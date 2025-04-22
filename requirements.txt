@@ -1,0 +1,36 @@
+# --- Web Framework & Server ---
+fastapi==0.111.0
+nicegui==2.13.0
+uvicorn[standard]==0.34.0 # Includes websockets, http-tools etc.
+starlette==0.46.1
+# Jinja2 is often a dependency of web frameworks
+Jinja2==3.1.6
+
+# --- Database ---
+SQLAlchemy==2.0.38
+psycopg2-binary==2.9.10 # Sync driver 
+asyncpg==0.30.0        # Async driver for SQLAlchemy async support
+
+# --- Authentication & Utilities ---
+passlib[bcrypt]==1.7.4
+bcrypt==4.3.0 # Explicit dependency for passlib[bcrypt]
+python-dotenv==1.0.1
+python-jose[cryptography]==3.4.0
+cryptography==44.0.2 # From python-jose[cryptography]
+email-validator==2.2.0
+pydantic==2.11.2 # Core data validation lib used by FastAPI/NiceGUI
+pydantic_core==2.33.1 # Core for pydantic
+
+# --- LLM & Machine Learning ---
+torch==2.6.0
+transformers==4.50.3
+peft==0.15.1  # Parameter-Efficient Fine-Tuning
+accelerate==1.6.0 # For device map, distributed training helpers
+bitsandbytes==0.45.5 # For 4/8-bit quantization (requires specific OS/CUDA setup)
+sentencepiece==0.2.0 # Tokenizer library often needed by models
+datasets==3.5.0 
+
+# --- Other Common Dependencies ---
+websockets==15.0.1
+anyio==4.9.0
+tqdm==4.67.1

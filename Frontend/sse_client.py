@@ -1,0 +1,50 @@
+# file: frontend/sse_client.py
+import httpx
+import asyncio
+from typing import AsyncGenerator, Optional
+import os
+
+BACKEND_BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+
+# Reuse the client instance if possible, or create a new one for SSE
+# Be mindful of cookie persistence if creating new clients frequently
+_sse_client = httpx.AsyncClient(base_url=BACKEND_BASE_URL, timeout=None) # No timeout for SSE stream
+
+async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) -> AsyncGenerator[str, None]:
+    """Connects to SSE endpoint and yields tokens."""
+    url = f"/api/chat/stream/{stream_id}"
+    headers = {"Accept": "text/event-stream"}
+    # Pass cookies explicitly if needed and not automatically handled by client instance
+    request_cookies = cookies or _sse_client.cookies
+
+    try:
+        async with _sse_client.stream("GET", url, headers=headers, cookies=request_cookies) as response:
+            print(f"SSE: Connected to {url}, Status: {response.status_code}")
+            response.raise_for_status() # Check for initial connection errors
+
+            async for line in response.aiter_lines():
+                # print(f"SSE Raw Line: {line}") # Debug
+                if line.startswith("data:"):
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]": # Optional: Handle explicit done signal
+                        print("SSE: Received [DONE] signal.")
+                        break
+                    elif data.startswith("[ERROR]"):
+                         print(f"SSE: Received Error: {data}")
+                         yield data # Propagate error message
+                         break
+                    else:
+                        yield data # Yield the actual token/message
+                # Handle other SSE fields like 'event:' or 'id:' if needed
+
+    except httpx.RequestError as e:
+        print(f"SSE Request Error: {e}")
+        yield f"[ERROR] Connection failed: {e}"
+    except httpx.HTTPStatusError as e:
+         print(f"SSE HTTP Status Error: {e.response.status_code}")
+         yield f"[ERROR] Connection error: Status {e.response.status_code}"
+    except Exception as e:
+        print(f"SSE Unexpected Error: {e}")
+        yield f"[ERROR] Unexpected error during streaming: {e}"
+    finally:
+        print(f"SSE: Stream finished or closed for {stream_id}")

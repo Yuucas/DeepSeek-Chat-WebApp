@@ -1,0 +1,1462 @@
+================================================
+File: Backend\algorithm\llm.py
+================================================
+import os
+import torch
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    TextIteratorStreamer,
+    BitsAndBytesConfig
+)
+from peft import PeftModel
+from dotenv import load_dotenv
+from threading import Thread
+from typing import List, Dict, AsyncGenerator
+import asyncio
+
+load_dotenv()
+
+BASE_MODEL_ID = os.getenv("BASE_MODEL_ID")
+ADAPTER_PATH = os.getenv("ADAPTER_PATH")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+USE_QUANTIZATION = False # Set based on your training/preference
+bnb_config = None
+
+if not BASE_MODEL_ID or not ADAPTER_PATH:
+    raise ValueError("LLM configuration (BASE_MODEL_ID, ADAPTER_PATH) not found in environment variables.")
+
+if USE_QUANTIZATION:
+     bnb_config = BitsAndBytesConfig(
+         load_in_4bit=True,
+         bnb_4bit_use_double_quant=True,
+         bnb_4bit_quant_type="nf4",
+         bnb_4bit_compute_dtype=torch.bfloat16
+     )
+
+# --- Global Model State ---
+model = None
+tokenizer = None
+
+def load_llm():
+    """Loads the LLM and tokenizer (call once on startup)."""
+    global model, tokenizer
+    if model is not None and tokenizer is not None:
+        print("LLM already loaded.")
+        return
+
+    print(f"LLM - Loading tokenizer: {BASE_MODEL_ID}")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        print("LLM - Set pad_token to eos_token")
+
+    print(f"LLM - Loading base model: {BASE_MODEL_ID} (Quantization: {USE_QUANTIZATION})")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL_ID,
+        quantization_config=bnb_config if USE_QUANTIZATION else None,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        device_map="auto"
+    )
+
+    print(f"LLM - Loading LoRA adapter from: {ADAPTER_PATH}")
+    if not os.path.exists(ADAPTER_PATH):
+        raise FileNotFoundError(f"LLM - Adapter path not found: {ADAPTER_PATH}")
+
+    try:
+        model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
+        model.eval()
+        print("LLM - Model loaded successfully.")
+    except Exception as e:
+        print(f"LLM - Error loading PEFT adapter: {e}")
+        raise e
+
+async def generate_response_stream(chat_history: List[Dict[str, str]]) -> AsyncGenerator[str, None]:
+    """Generates response token by token asynchronously."""
+    global model, tokenizer
+    if model is None or tokenizer is None:
+        yield "Error: LLM not loaded."
+        return
+
+    try:
+        # Simple history truncation (implement better logic if needed)
+        MAX_TURNS = 10 # Keep last N turns
+        truncated_history = chat_history[-MAX_TURNS*2:] # Keep user+assistant pairs
+
+        formatted_prompt = tokenizer.apply_chat_template(
+            truncated_history,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
+        streamer = TextIteratorStreamer(
+            tokenizer,
+            skip_prompt=True,
+            skip_special_tokens=True
+        )
+
+        generation_kwargs = dict(
+            inputs,
+            streamer=streamer,
+            max_new_tokens=500, # Adjust as needed
+            pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            do_sample=True,
+            temperature=0.5,
+            top_p=0.9,
+        )
+
+        # Run blocking generation in a separate thread
+        thread = Thread(target=model.generate, kwargs=generation_kwargs)
+        thread.start()
+
+        # Yield results from the streamer
+        for new_token in streamer:
+            yield new_token
+            await asyncio.sleep(0.05) # Prevent tight loop blocking
+
+        thread.join() # Ensure thread finishes
+
+    except Exception as e:
+        print(f"LLM - Error during generation: {e}")
+        yield f"Error: Could not generate response - {e}"
+
+================================================
+File: Backend\services\auth.py
+================================================
+import os
+from passlib.context import CryptContext
+from dotenv import load_dotenv
+# For simplified session management via NiceGUI storage, JWT might be less necessary
+# from datetime import datetime, timedelta, timezone
+# from typing import Optional
+# import jwt # from pyjwt
+# from jose import JWTError, jwt
+
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+# ALGORITHM = os.getenv("ALGORITHM", "HS256") # Needed if using JWT
+# ACCESS_TOKEN_EXPIRE_MINUTES = 30 # Example expiry if using JWT
+
+if not SECRET_KEY:
+    raise ValueError("No SECRET_KEY found in environment variables")
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception:
+        return False
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+================================================
+File: Backend\services\crud.py
+================================================
+from sqlalchemy import select, update, delete, func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload 
+from ..models import User, ChatSession, ChatMessage
+from .auth import get_password_hash
+import uuid
+from typing import List, Optional
+
+async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
+    result = await db.execute(select(User).filter(User.email == email))
+    return result.scalar_one_or_none()
+
+async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
+    result = await db.execute(select(User).filter(User.id == user_id))
+    return result.scalar_one_or_none()
+
+async def create_user(db: AsyncSession, email: str, password: str) -> User:
+    hashed_password = get_password_hash(password)
+    db_user = User(email=email, hashed_password=hashed_password)
+    db.add(db_user)
+    await db.commit()
+    await db.refresh(db_user)
+    return db_user
+
+async def get_user_sessions(db: AsyncSession, user_id: int) -> List[ChatSession]:
+    result = await db.execute(
+        select(ChatSession)
+        .where(ChatSession.user_id == user_id)
+        .order_by(ChatSession.last_updated_at.desc())
+    )
+    return result.scalars().all()
+
+async def get_session_by_id(db: AsyncSession, session_id: str, user_id: int) -> Optional[ChatSession]:
+     # Ensure user owns the session
+    result = await db.execute(
+        select(ChatSession)
+        .where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+        .options(selectinload(ChatSession.messages)) # Eager load messages
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_chat_session(db: AsyncSession, user_id: int, title: Optional[str] = None) -> ChatSession:
+    session_id = str(uuid.uuid4())
+    db_session = ChatSession(id=session_id, user_id=user_id, title=title)
+    db.add(db_session)
+    await db.commit()
+    await db.refresh(db_session)
+    return db_session
+
+async def add_chat_message(db: AsyncSession, session_id: str, role: str, content: str) -> ChatMessage:
+    # Fetch session first to update its timestamp
+    stmt = (
+         update(ChatSession)
+         .where(ChatSession.id == session_id)
+         .values(last_updated_at=func.now()) # Use func.now() for database time
+     )
+    await db.execute(stmt)
+
+    # 2. Create and add the message object (part of the transaction)
+    db_message = ChatMessage(session_id=session_id, role=role, content=content)
+    db.add(db_message)
+
+    # 3. Flush changes to get ID/defaults, but DO NOT COMMIT
+    #    Flush is often needed before refresh if defaults are generated DB-side.
+    #    Refresh needs the object associated with the session.
+    await db.flush([db_message]) # Flush to potentially get generated values like ID before refresh
+
+    # 4. Refresh the object to load defaults (like timestamp, potentially ID if sequence)
+    #    This needs to happen before the transaction commits but after flush.
+    await db.refresh(db_message)
+
+    # 5. REMOVE EXPLICIT COMMIT - Let the caller's context manager handle it.
+    # await db.commit() # <-- REMOVE THIS LINE
+
+    # 6. Return the refreshed object
+    return db_message
+
+async def delete_chat_session(db: AsyncSession, session_id: str, user_id: int):
+     # Ensure user owns the session before deleting
+     stmt = delete(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+     await db.execute(stmt)
+     await db.commit() # Messages should cascade delete
+
+async def delete_all_user_sessions(db: AsyncSession, user_id: int):
+     stmt = delete(ChatSession).where(ChatSession.user_id == user_id)
+     await db.execute(stmt)
+     await db.commit()
+
+================================================
+File: Backend\core.py
+================================================
+
+
+================================================
+File: Backend\database.py
+================================================
+import os
+import asyncio
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncAttrs
+from sqlalchemy.orm import DeclarativeBase
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("No DATABASE_URL found in environment variables")
+
+engine = create_async_engine(DATABASE_URL)
+async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+
+class Base(AsyncAttrs, DeclarativeBase):
+    pass
+
+# --- Async Session Dependency ---
+async def get_db_session():
+    async with async_session_maker() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+async def async_main():
+    async with engine.begin() as conn:
+        # await conn.run_sync(Base.metadata.drop_all) # Use with caution! Deletes tables!
+        await conn.run_sync(Base.metadata.create_all)
+    print("Database tables created (if they didn't exist).")
+
+
+
+
+
+================================================
+File: Backend\dependencies.py
+================================================
+# file: backend/dependencies.py
+from fastapi import Request, HTTPException, status, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from .services import crud
+from .models import *
+from .database import get_db_session
+
+# Simple dependency based on NiceGUI's session storage for now.
+# For more robust API auth, implement JWT or FastAPI session middleware.
+async def get_current_user_id_from_session(request: Request) -> int: # Renamed for clarity
+    """
+    Retrieves the user ID from the session managed by SessionMiddleware.
+    Raises 401 Unauthorized if user_id is not found in the session.
+    """
+    user_id = request.session.get("user_id")
+    # print(f"DEBUG: Checking session for user_id: {user_id}") # Debug print
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"}, # Standard header, though not strictly bearer here
+        )
+    try:
+        return int(user_id)
+    except (ValueError, TypeError):
+         # Should not happen if session is set correctly, but good practice
+         request.session.clear() # Clear corrupted session
+         raise HTTPException(
+             status_code=status.HTTP_401_UNAUTHORIZED,
+             detail="Invalid session data",
+             headers={"WWW-Authenticate": "Bearer"},
+         )
+
+
+async def get_current_active_user(
+    user_id: int = Depends(get_current_user_id_from_session), # Use the session-based dependency
+    db: AsyncSession = Depends(get_db_session)
+) -> User:
+    """
+    Fetches the full User object from DB based on the authenticated user ID from session.
+    """
+    user = await crud.get_user_by_id(db, user_id=user_id)
+    if user is None:
+        # User ID was in session but not in DB (e.g., deleted user) - clear session
+        # request.session.clear() # Cannot access request here directly, handle in endpoint if needed
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    # Add checks here if users can be inactive
+    # if not user.is_active:
+    #     raise HTTPException(status_code=400, detail="Inactive user")
+    return user
+
+================================================
+File: Backend\models.py
+================================================
+from .database import Base
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import String, Text, ForeignKey, BigInteger, func, DateTime # Import DateTime
+import datetime
+from typing import List, Optional
+
+class User(Base):
+    __tablename__ = "chat_users" # Use a more descriptive name
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    sessions: Mapped[List["ChatSession"]] = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("chat_users.id"), nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+         DateTime(timezone=True), server_default=func.now()
+    )
+    last_updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="sessions")
+    messages: Mapped[List["ChatMessage"]] = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan", order_by="ChatMessage.timestamp")
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    session_id: Mapped[str] = mapped_column(String, ForeignKey("chat_sessions.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False) # "user" or "assistant"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    session: Mapped["ChatSession"] = relationship("ChatSession", back_populates="messages")
+
+
+
+# --- Pydantic Models for API ---
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserLogin(BaseModel):
+    email: EmailStr # Often username in FastAPI OAuth2 examples
+    password: str
+
+class UserPublic(BaseModel):
+    id: int
+    email: EmailStr
+    class Config:
+        from_attributes = True # Or orm_mode = True for older Pydantic
+
+class SessionInfo(BaseModel):
+    id: str
+    title: Optional[str] = None
+    # Add other fields if needed by frontend list (e.g., last_updated_at)
+    last_updated_at: datetime.datetime # Import datetime
+    class Config:
+        from_attributes = True
+
+class MessageInfo(BaseModel):
+    id: int
+    role: str
+    content: str
+    timestamp: datetime.datetime # Import datetime
+    class Config:
+        from_attributes = True
+
+class SessionDetail(SessionInfo):
+    messages: List[MessageInfo] = []
+
+class InitiateChatRequestApi(BaseModel): # Renamed to avoid clash
+    session_id: Optional[str] = None # Can be null for new chat
+    user_message: str
+
+class InitiateChatResponseApi(BaseModel): # Renamed
+    session_id: str
+    user_message_id: int
+    stream_id: str # ID to use for the SSE connection
+
+================================================
+File: Backend\routes.py
+================================================
+import asyncio
+import uuid
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
+from fastapi.responses import StreamingResponse
+from typing import List, Dict, Optional, AsyncGenerator
+from sqlalchemy.ext.asyncio import AsyncSession # Import AsyncSession
+
+# Use relative imports within the backend package
+from .services import crud, auth
+from .database import get_db_session, async_session_maker # Import DB session dependency
+from .dependencies import get_current_active_user, get_current_user_id_from_session # Import auth dependency
+from .models import User, UserCreate, UserLogin, UserPublic, SessionInfo, SessionDetail, InitiateChatRequestApi, InitiateChatResponseApi
+from .algorithm import llm
+
+
+router = APIRouter(tags=["Yucas"], prefix="/api")
+
+# --- API Endpoints ---
+
+
+# --- Signup Endpoint ---
+@router.post("/signup", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
+async def api_signup(user_data: UserCreate, db: AsyncSession = Depends(get_db_session)):
+    existing_user = await crud.get_user_by_email(db, email=user_data.email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered.",
+        )
+    user = await crud.create_user(db, email=user_data.email, password=user_data.password)
+    return user
+
+
+# --- Login Endpoint ---
+@router.post("/login") 
+async def api_login(
+    request: Request, # Inject Request to access session
+    form_data: UserLogin,
+    db: AsyncSession = Depends(get_db_session)
+):
+     user = await crud.get_user_by_email(db, email=form_data.email)
+     if not user or not auth.verify_password(form_data.password, user.hashed_password):
+         raise HTTPException(
+             status_code=status.HTTP_401_UNAUTHORIZED,
+             detail="Incorrect email or password",
+             # headers={"WWW-Authenticate": "Bearer"}, # Not needed for session auth
+         )
+     # --- Set session data upon successful login ---
+     request.session["user_id"] = user.id
+     request.session["email"] = user.email # Store email too if needed
+     # print(f"DEBUG: Session set for user_id: {request.session['user_id']}") # Debug print
+     # Return user info for frontend convenience
+     return {"message": "Login successful", "user_id": user.id, "email": user.email}
+
+
+# --- Logout Endpoint ---
+@router.post("/logout")
+async def api_logout(request: Request):
+    """Clears the user session."""
+    request.session.clear()
+    # print("DEBUG: Session cleared.") # Debug print
+    return {"message": "Logout successful"}
+
+
+# --- User Info Endpoints ---
+@router.get("/users/me", response_model=UserPublic)
+async def api_read_users_me(current_user: User = Depends(get_current_active_user)):
+    """Returns the current logged-in user's info."""
+    return current_user
+
+# --- User Sessions Endpoints ---
+@router.get("/sessions", response_model=List[SessionInfo])
+async def api_get_sessions(
+    user_id: int = Depends(get_current_user_id_from_session), # Use the simpler dependency here
+    db: AsyncSession = Depends(get_db_session)
+):
+    """Gets list of chat sessions for the current user."""
+    sessions = await crud.get_user_sessions(db, user_id=user_id)
+    return sessions
+
+
+# --- Session Details Endpoints ---
+@router.get("/sessions/{session_id}", response_model=SessionDetail)
+async def api_get_session_details(
+    session_id: str,
+    user_id: int = Depends(get_current_user_id_from_session),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """Gets details (including messages) for a specific session."""
+    session = await crud.get_session_by_id(db, session_id=session_id, user_id=user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+    return session
+
+
+# --- Delete Session Endpoint ---
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def api_delete_session(
+    session_id: str,
+    user_id: int = Depends(get_current_user_id_from_session),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """Deletes a specific chat session."""
+    # crud function already checks ownership implicitly via user_id filter
+    await crud.delete_chat_session(db, session_id=session_id, user_id=user_id)
+    return None # Return None for 204
+
+# --- Chat Routes ---
+# Temporary storage for stream contexts (same warning applies: not production-ready)
+stream_contexts: Dict[str, List[Dict[str, str]]] = {}
+
+# --- Initiate Chat Endpoint ---
+@router.post("/chat/initiate", response_model=InitiateChatResponseApi)
+async def api_initiate_chat(
+    request_data: InitiateChatRequestApi,
+    user_id: int = Depends(get_current_user_id_from_session),
+    db: AsyncSession = Depends(get_db_session)
+):
+    # ... (logic is correct as previously refined) ...
+    if llm.model is None or llm.tokenizer is None:
+        raise HTTPException(status_code=503, detail="LLM not loaded yet")
+
+    session_id = request_data.session_id
+    user_message_content = request_data.user_message
+
+    if session_id:
+        session = await crud.get_session_by_id(db, session_id=session_id, user_id=user_id)
+        if not session:
+             raise HTTPException(status_code=404, detail="Session not found or access denied")
+    else:
+        session = await crud.create_chat_session(db, user_id=user_id, title=user_message_content[:50])
+        session_id = session.id
+        print(f"API: Created new session {session_id} for user {user_id}")
+
+    user_message = await crud.add_chat_message(
+        db, session_id=session_id, role="user", content=user_message_content
+    )
+    await db.commit() # Commit user message save
+
+    updated_session = await crud.get_session_by_id(db, session_id=session_id, user_id=user_id)
+    history_for_llm = [
+        {"role": msg.role, "content": msg.content}
+        for msg in updated_session.messages
+    ]
+    print(f"History for LLM: {history_for_llm}")
+
+    stream_id = str(uuid.uuid4())
+    stream_contexts[stream_id] = {
+        'history': history_for_llm,
+        'session_id': session_id,
+        'user_id': user_id # Keep user_id if needed for context, but not strictly for saving now
+    }
+    print(f"API: Initiated stream {stream_id} for session {session_id}")
+
+    return InitiateChatResponseApi(
+        session_id=session_id,
+        user_message_id=user_message.id,
+        stream_id=stream_id
+    )
+
+# --- Stream Chat Endpoint ---
+@router.get("/chat/stream/{stream_id}")
+async def api_stream_chat(stream_id: str):
+    """Handles the SSE connection and streams the AI response."""
+    print(f"API: SSE connection requested for stream ID: {stream_id}")
+
+    if llm.model is None or llm.tokenizer is None:
+         raise HTTPException(status_code=503, detail="LLM not loaded yet")
+
+    # Use .get() for safer access and check if context exists
+    context = stream_contexts.pop(stream_id, None) # Pop context immediately
+    if not context:
+         print(f"API: Stream ID {stream_id} not found or already processed.")
+         raise HTTPException(status_code=404, detail="Stream session not found or expired")
+
+    history = context['history']
+    session_id = context['session_id']
+    # user_id = context['user_id'] # We might not need user_id here anymore
+
+    async def event_generator():
+        """Generator yields tokens and saves full response at the end."""
+        full_response = ""
+        llm_error_occurred = False
+        try:
+            token_count = 0
+            async for token in llm.generate_response_stream(history):
+                token_count += 1
+                if "[ERROR]" in token:
+                    print(f"API: LLM Error received for stream {stream_id}: {token}")
+                    full_response = token # Store the error message
+                    llm_error_occurred = True
+                    yield f"data: {token}\n\n" # Send error to client
+                    break # Stop streaming
+
+                full_response += token
+                yield f"data: {token}\n\n"
+                await asyncio.sleep(0.01)
+            print(f"API: Streaming finished for {stream_id}. Tokens: {token_count}")
+            print(f"API: Full response: {full_response}")
+
+        except Exception as e:
+            llm_error_occurred = True
+            full_response = f"[ERROR] Streaming failed unexpectedly in generator: {e}"
+            print(f"API: Error during event_generator for {stream_id}: {e}")
+            # Yield error to frontend if generator crashes
+            try:
+                 yield f"data: {full_response}\n\n"
+            except Exception: # Catch potential errors if client disconnected
+                 pass
+        finally:
+            # --- Save assistant message AFTER streaming loop/generator completes ---
+            if not llm_error_occurred and full_response:
+                print(f"API: Attempting to save assistant response for session {session_id}. Length: {len(full_response)}")
+                try:
+                    # Create a NEW database session specifically for saving
+                    async with async_session_maker() as db_session:
+                        async with db_session.begin():
+                            await crud.add_chat_message(db_session, session_id, "assistant", full_response)
+                        # No explicit commit needed with session.begin()
+                        print(f"API: Successfully saved assistant message for session {session_id}")
+                except Exception as db_err:
+                    # Log the critical error but don't crash the response stream
+                    print(f"API: CRITICAL - Failed to save assistant message for session {session_id}: {db_err}")
+                    ## Yield error message to client if needed
+                    try:
+                       yield f"data: [ERROR] Failed to save response to DB.\n\n"
+                    except Exception: pass
+            elif not full_response and not llm_error_occurred:
+                print(f"API: No response generated for stream {stream_id}, not saving.")
+            else: # Error occurred
+                print(f"API: Skipping DB save due to generation error for stream {stream_id}.")
+
+            # Context was already popped, no need to delete here
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+# --- Health Check ---
+@router.get("/health")
+async def health_check():
+    return {"status": "ok", "model_loaded": llm.model is not None}
+
+================================================
+File: Backend\main.py
+================================================
+import os
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from starlette.middleware.sessions import SessionMiddleware
+from contextlib import asynccontextmanager
+import asyncio
+
+# Use relative imports within the backend package
+from .algorithm import llm
+from .routes import router
+from .database import async_main # Import DB session dependency
+
+load_dotenv() # Load .env variables
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY not configured in .env file for session middleware")
+
+# --- FastAPI Lifespan for Model Loading ---
+@asynccontextmanager
+async def lifespan(the_app: FastAPI):
+    print("Database: Creating tables...")
+    await async_main()
+    print("Backend: Loading LLM...")
+    llm.load_llm()
+    print("Backend: LLM loaded.")
+    yield
+    print("Backend: Shutting down.")
+    # Cleanup if needed
+
+app = FastAPI(lifespan=lifespan, title="Chat App Backend API")
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    # https_only=True, # Set to True in production with HTTPS
+    # max_age=14 * 24 * 60 * 60, # Example: 14 days session expiry
+    # same_site="lax", # Good default for security ('strict' is more secure but can break some cross-site links)
+)
+
+app.include_router(router)
+
+
+
+================================================
+File: Frontend\api_client.py
+================================================
+# file: frontend/api_client.py
+import httpx
+from typing import Optional, List, Dict, Any
+import os
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
+# Get base URL from environment or use a default for local dev
+# Note: When running combined, this might be tricky. Usually you'd configure this.
+# For now, assume it runs on the same host/port.
+BACKEND_BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+print(f"---- Using backend URL: ----- {BACKEND_BASE_URL}")
+
+# Store cookies globally for the client instance (simplistic approach)
+# In a real app, manage cookies per user session more carefully.
+_client = httpx.AsyncClient(base_url=BACKEND_BASE_URL, timeout=180.0) # Longer timeout
+
+async def api_login(email: str, password: str) -> Optional[Dict[str, Any]]:
+    """Calls the backend login API."""
+    try:
+        response = await _client.post("api/login", json={"email": email, "password": password})
+        response.raise_for_status() # Raise exception for 4xx/5xx errors
+        # Login success sets a cookie automatically handled by httpx client instance
+        return response.json() # Return user info or success message
+    except httpx.HTTPStatusError as e:
+        print(f"Login API error: {e.response.status_code} - {e.response.text}")
+        return None # Indicate login failure
+    except Exception as e:
+        print(f"Login request error: {e}")
+        return None
+
+async def api_signup(email: str, password: str) -> Optional[Dict[str, Any]]:
+    """Calls the backend signup API."""
+    try:
+        response = await _client.post("api/signup", json={"email": email, "password": password})
+        response.raise_for_status()
+        return response.json() # Return created user info
+    except httpx.HTTPStatusError as e:
+        print(f"Signup API error: {e.response.status_code} - {e.response.text}")
+        # Extract detail message if possible
+        detail = "Signup failed."
+        try:
+            detail = e.response.json().get("detail", detail)
+        except Exception: pass
+        raise ValueError(detail) # Raise specific error for UI
+    except Exception as e:
+        print(f"Signup request error: {e}")
+        raise ValueError("An unexpected error occurred during signup.")
+    
+
+async def api_logout() -> bool:
+    """Calls the backend logout API."""
+    try:
+        response = await _client.post("/api/logout") # Correct path
+        response.raise_for_status()
+        # Clear local cookies managed by the client instance
+        _client.cookies.clear()
+        return True
+    except Exception as e:
+        print(f"Logout API error: {e}")
+        return False
+
+
+async def api_get_current_user() -> Optional[Dict[str, Any]]:
+    """Calls the backend /api/users/me endpoint."""
+    try:
+        response = await _client.get("api/users/me")
+        if response.status_code == 401: # Handle unauthorized specifically
+            return None
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+         print(f"Get current user API error: {e.response.status_code} - {e.response.text}")
+         return None
+    except Exception as e:
+        print(f"Get current user request error: {e}")
+        return None
+
+async def api_get_sessions() -> List[Dict[str, Any]]:
+    """Calls the backend to get user's sessions."""
+    try:
+        response = await _client.get("api/sessions")
+        if response.status_code == 401: return [] # Not logged in
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Get sessions error: {e}")
+        return []
+
+async def api_get_session_details(session_id: str) -> Optional[Dict[str, Any]]:
+     """Calls backend to get messages for a session."""
+     try:
+         response = await _client.get(f"api/sessions/{session_id}")
+         if response.status_code == 401: return None
+         if response.status_code == 404: return None
+         response.raise_for_status()
+         return response.json()
+     except Exception as e:
+         print(f"Get session details error for {session_id}: {e}")
+         return None
+
+async def api_delete_session(session_id: str) -> bool:
+    """Calls backend to delete a session."""
+    try:
+        response = await _client.delete(f"api/sessions/{session_id}")
+        if response.status_code == 401: return False
+        response.raise_for_status() # Raises for 4xx/5xx excluding 401 handled above
+        return response.status_code == 204 # Success is No Content
+    except Exception as e:
+        print(f"Delete session error for {session_id}: {e}")
+        return False
+
+async def api_initiate_chat(session_id: Optional[str], user_message: str) -> Optional[Dict[str, Any]]:
+     """Calls backend to start chat generation."""
+     try:
+         payload = {"session_id": session_id, "user_message": user_message}
+         response = await _client.post("api/chat/initiate", json=payload)
+         if response.status_code == 401: return None
+         response.raise_for_status()
+         return response.json() # Returns {session_id, user_message_id, stream_id}
+     except Exception as e:
+         print(f"Initiate chat error: {e}")
+         return None
+
+# Note: SSE connection handled separately in sse_client.py or directly in UI logic
+
+================================================
+File: Frontend\sse_client.py
+================================================
+# file: frontend/sse_client.py
+import httpx
+import asyncio
+from typing import AsyncGenerator, Optional
+import os
+
+BACKEND_BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+
+# Reuse the client instance if possible, or create a new one for SSE
+# Be mindful of cookie persistence if creating new clients frequently
+_sse_client = httpx.AsyncClient(base_url=BACKEND_BASE_URL, timeout=None) # No timeout for SSE stream
+
+async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) -> AsyncGenerator[str, None]:
+    """Connects to SSE endpoint and yields tokens."""
+    url = f"/api/chat/stream/{stream_id}"
+    headers = {"Accept": "text/event-stream"}
+    # Pass cookies explicitly if needed and not automatically handled by client instance
+    request_cookies = cookies or _sse_client.cookies
+
+    try:
+        async with _sse_client.stream("GET", url, headers=headers, cookies=request_cookies) as response:
+            print(f"SSE: Connected to {url}, Status: {response.status_code}")
+            response.raise_for_status() # Check for initial connection errors
+
+            async for line in response.aiter_lines():
+                # print(f"SSE Raw Line: {line}") # Debug
+                if line.startswith("data:"):
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]": # Optional: Handle explicit done signal
+                        print("SSE: Received [DONE] signal.")
+                        break
+                    elif data.startswith("[ERROR]"):
+                         print(f"SSE: Received Error: {data}")
+                         yield data # Propagate error message
+                         break
+                    else:
+                        yield data # Yield the actual token/message
+                # Handle other SSE fields like 'event:' or 'id:' if needed
+
+    except httpx.RequestError as e:
+        print(f"SSE Request Error: {e}")
+        yield f"[ERROR] Connection failed: {e}"
+    except httpx.HTTPStatusError as e:
+         print(f"SSE HTTP Status Error: {e.response.status_code}")
+         yield f"[ERROR] Connection error: Status {e.response.status_code}"
+    except Exception as e:
+        print(f"SSE Unexpected Error: {e}")
+        yield f"[ERROR] Unexpected error during streaming: {e}"
+    finally:
+        print(f"SSE: Stream finished or closed for {stream_id}")
+
+================================================
+File: Frontend\main.py
+================================================
+import os
+import traceback
+from fastapi import FastAPI
+from nicegui import ui, app, Client
+from typing import Optional, List, Dict, Any
+import datetime # Import datetime
+from email_validator import validate_email, EmailNotValidError # Import validator
+import asyncio
+
+# Use relative imports if these helpers are in the same package/folder
+from . import api_client # Use the API client helper
+from . import sse_client # Use the SSE client helper
+
+# --- Authentication Check Decorator (Optional but Recommended) ---
+def requires_login(func):
+    """Decorator to redirect to login if user not authenticated."""
+    async def wrapper(*args, **kwargs):
+        # Check backend API for current user status
+        user = await api_client.api_get_current_user()
+        if not user:
+             # Check if NiceGUI storage also thinks user is logged out
+             # This handles cases where backend session expired but UI didn't refresh
+             if not app.storage.user.get('user_info'):
+                 print("Auth check: No user info in storage, redirecting to login.")
+                 ui.navigate.to('/')
+                 return
+             else:
+                 # Discrepancy: UI thinks logged in, backend says no. Clear UI state.
+                 print("Auth check: Backend session invalid, clearing UI state and redirecting.")
+                 app.storage.user.clear()
+                 ui.navigate.to('/')
+                 return
+
+        # If backend confirms user, ensure UI storage is consistent
+        if not app.storage.user.get('user_info'):
+             app.storage.user['user_info'] = user # Update UI storage
+
+        # Proceed with the original function
+        return await func(*args, **kwargs)
+    return wrapper
+
+
+# --- NiceGUI Page Definitions ---
+
+@ui.page('/') # Root path - redirect logic
+async def route_root():
+    # Check auth status via API and redirect accordingly
+    if await api_client.api_get_current_user():
+        print("UI Root: User authenticated, redirecting to /main")
+        ui.navigate.to('/main')
+    else:
+        print("UI Root: User not authenticated, redirecting to /login")
+        ui.navigate.to('/login')
+
+
+@ui.page('/login')
+async def login_page():
+    # Redirect if already logged in (check via API for robustness)
+    # No need for decorator here, check explicitly
+    if await api_client.api_get_current_user():
+        ui.navigate.to('/main')
+        return
+
+    ui.label("Login").classes('text-2xl mb-4')
+    email_input = ui.input("Email").props('type="email" outlined autocomplete="email"')
+    password_input = ui.input("Password").props('type="password" outlined autocomplete="current-password"')
+    error_label = ui.label().classes('text-red-500 mt-2')
+
+    async def handle_login():
+        error_label.set_text("")
+        email = email_input.value
+        password = password_input.value
+        if not email or not password:
+            error_label.set_text("Please enter email and password.")
+            return
+
+        # Call backend API via api_client
+        user_info = await api_client.api_login(email, password)
+
+        if user_info and user_info.get("user_id"):
+            print(f"UI: User logged in: {user_info.get('email', 'Unknown')}")
+            ui.navigate.to('/main') # Redirect to chat page
+        else:
+            error_label.set_text("Invalid email or password.")
+
+    ui.button("Login", on_click=handle_login)
+    ui.link("Don't have an account? Sign up", '/signup').classes('mt-4')
+
+
+@ui.page('/signup')
+async def signup_page():
+    if await api_client.api_get_current_user(): # Redirect if logged in
+        ui.navigate.to('/main')
+        return
+
+    ui.label("Sign Up").classes('text-2xl mb-4')
+    email_input = ui.input("Email").props('type="email" outlined autocomplete="email"')
+    password_input = ui.input("Password").props('type="password" outlined autocomplete="new-password"')
+    confirm_password_input = ui.input("Confirm Password").props('type="password" outlined autocomplete="new-password"')
+    error_label = ui.label().classes('text-red-500 mt-2')
+
+    async def handle_signup():
+        error_label.set_text("")
+        email = email_input.value
+        password = password_input.value
+        confirm_password = confirm_password_input.value
+
+        # Basic frontend validation
+        if not email or not password or not confirm_password:
+            error_label.set_text("Please fill in all fields.")
+            return
+        try:
+             validate_email(email)
+        except EmailNotValidError as e:
+             error_label.set_text(f"Invalid email format: {e}")
+             return
+        if password != confirm_password:
+            error_label.set_text("Passwords do not match.")
+            return
+        if len(password) < 8:
+             error_label.set_text("Password must be at least 8 characters long.")
+             return
+
+        # Call backend API via api_client
+        try:
+            user_info = await api_client.api_signup(email, password)
+            if user_info:
+                 # Automatically log in after signup (backend might need to handle this by setting session)
+                 # For now, just try logging in again or store info and redirect
+                 login_result = await api_client.api_login(email, password)
+                 if login_result and login_result.get("user_id"):
+                     app.storage.user["user_info"] = {"id": login_result["user_id"], "email": login_result["email"]}
+                     print(f"UI: User signed up and logged in: {login_result['email']}")
+                     ui.navigate.to('/')
+                 else:
+                      # Should not happen if signup worked, but handle edge case
+                      error_label.set_text("Signup successful, but auto-login failed. Please login manually.")
+                      ui.navigate.to('/login') # Redirect to login after signup success
+
+            else: # Should be handled by exception below, but defensive check
+                 error_label.set_text("Signup failed (unexpected).")
+        except ValueError as e: # Catch specific error from api_client
+             error_label.set_text(str(e))
+        except Exception as e:
+             print(f"UI Signup Error: {e}")
+             error_label.set_text("An unexpected error occurred.")
+
+
+    ui.button("Sign Up", on_click=handle_signup)
+    ui.link("Already have an account? Login", '/login').classes('mt-4')
+
+
+@ui.page('/main')
+# @requires_login # Apply the auth check decorator - Needs refinement for NiceGUI pages
+async def main_chat_page(client: Client):
+     # --- Authentication Check ---
+     user = await api_client.api_get_current_user()
+     if not user:
+        ui.navigate.to('/login')
+        print("Chat Page: No active session found via API, redirecting to login.")
+        return
+
+     print(f"Chat Page: Loading for user {user.get('email')}") # Log user
+
+     # --- State Initialization ---
+     # Ensure state exists for this client connection
+     if "chat" not in client.storage or not isinstance(client.storage.get("chat"), dict):
+         print("Chat Page: Initializing chat state for client.")
+         client.storage["chat"] = {
+             "current_session_id": None,
+             "current_messages": [],
+             "sessions_list": [],
+             "is_generating": False,
+         }
+     # Use a direct reference for easier access within this page function scope
+     chat_state = client.storage["chat"]
+
+     # --- UI Structure ---
+     with ui.left_drawer(bordered=True).classes('bg-gray-100') as left_drawer:
+         with ui.column().classes('w-full'):
+             ui.button("New Chat", on_click=lambda: select_session(None)).classes('w-full mb-2')
+             ui.label("History").classes('text-lg font-semibold mb-1')
+             # Sessions List Refreshable
+             @ui.refreshable
+             async def sessions_container():
+                 print(f"UI: Rendering sessions_container. Session count: {len(chat_state.get('sessions_list', []))}") # Debug
+                 if not chat_state["sessions_list"]:
+                    ui.label("No chat history yet.").classes('p-2 text-gray-500')
+                 else:
+                    # Render in reverse chronological order (API already sorts)
+                    for session_data in chat_state["sessions_list"]:
+                        try:
+                            with ui.row().classes('w-full items-center cursor-pointer hover:bg-gray-200 p-1 rounded') \
+                                .on('click', lambda s_id=session_data.get('id'): select_session(s_id)):
+                                with ui.column().classes('flex-grow'):
+                                    ts_str = session_data.get('last_updated_at')
+                                    time_str = "Unknown time"
+                                    if isinstance(ts_str, str):
+                                        try:
+                                            if ts_str.endswith('Z'): ts_str = ts_str[:-1] + '+00:00'
+                                            ts = datetime.datetime.fromisoformat(ts_str)
+                                            time_str = ts.strftime("%b %d, %H:%M")
+                                        except ValueError:
+                                             print(f"Warning: Could not parse timestamp: {ts_str}")
+                                             time_str = ts_str # Show raw string on error
+                                    title = session_data.get('title') or "New Chat"
+                                    ui.label(title).classes('text-sm font-medium truncate')
+                                    ui.label(time_str).classes('text-xs text-gray-500')
+                                ui.button(icon='delete', on_click=lambda s_id=session_data.get('id'): delete_session_ui(s_id, sessions_container.refresh), color='negative') \
+                                    .props('flat round dense size=sm').classes('ml-auto')
+                        except Exception as e:
+                             print(f"ERROR rendering session item {session_data.get('id', 'UNKNOWN')}: {e}")
+                             traceback.print_exc() # Print full traceback for render errors
+                             ui.label(f"Error rendering session {session_data.get('id', 'UNKNOWN')}").classes('text-red-500')
+
+     # --- Main Chat Area ---
+     with ui.column().classes('w-full h-screen relative'):
+         # Static scroll container
+         messages_column = ui.column().classes('w-full h-full overflow-y-auto pb-20')
+         MESSAGES_COLUMN_ID = messages_column.id
+
+         # Refreshable content area
+         with messages_column:
+             @ui.refreshable
+             def chat_messages_area():
+                 # Make a local copy of messages for rendering to avoid potential issues
+                 # with iterating directly over client.storage during updates
+                 messages_to_render = chat_state.get("current_messages", []).copy()
+                 print(f"UI: Rendering chat_messages_area. Message count: {len(messages_to_render)}") # Debug
+                 if not messages_to_render:
+                      ui.label("Select a chat or start a new one.").classes('p-4 text-center text-gray-500')
+                 else:
+                    for msg_data in messages_to_render:
+                        try:
+                            role = msg_data.get('role', 'unknown')
+                            content = msg_data.get('content', '')
+                            is_user = role == 'user'
+                            name = role.capitalize()
+                            # Check if this specific message is the placeholder being generated
+                            is_loading_placeholder = (role == 'assistant' and
+                                                    chat_state.get("is_generating", False) and
+                                                    msg_data.get('id', '').startswith('assist_placeholder_')) # Use temp ID check
+
+                            # print(f"Rendering message: ID={msg_data.get('id')} Role={role} Loading={is_loading_placeholder}") # Debug
+
+                            with ui.chat_message(name=name, sent=is_user):
+                                display_content = content + ('...' if is_loading_placeholder else '')
+                                ui.markdown(display_content)
+                        except Exception as e:
+                             print(f"ERROR rendering message item {msg_data.get('id', 'UNKNOWN')}: {e}")
+                             traceback.print_exc()
+                             ui.label(f"Error rendering message {msg_data.get('id', 'UNKNOWN')}").classes('text-red-500')
+
+         # --- Input Area ---
+         with ui.row().classes('absolute bottom-0 left-0 right-0 p-4 bg-white border-t'):
+             chat_input = ui.input(placeholder="Type your message...") \
+                 .classes('flex-grow') \
+                 .props('outlined dense') \
+                 .on('keydown.enter', lambda: send_message(chat_messages_area.refresh, sessions_container.refresh))
+             send_button = ui.button(icon='send', on_click=lambda: send_message(chat_messages_area.refresh, sessions_container.refresh)) \
+                 .props('flat round dense')
+
+
+     # --- Helper Functions (now don't need client passed everywhere if using local chat_state) ---
+     async def update_sessions_list_ui(refresh_sessions_func):
+         try:
+             sessions = await api_client.api_get_sessions()
+             print(f"UI: Fetched sessions: {sessions}")
+             # Ensure state update happens
+             client.storage["chat"] = {**chat_state, "sessions_list": sessions}
+             refresh_sessions_func()
+             print("UI: sessions_container refreshed.")
+             print(f"Client Storage: {client.storage['chat']}") # Debug
+         except Exception as e:
+             print(f"Error updating sessions list: {e}")
+             ui.notify("Failed to load chat history.", type='negative')
+
+     async def scroll_chat_to_bottom():
+         """Scrolls the STATIC messages column to the bottom."""
+         if not chat_state['current_messages']: return
+         if MESSAGES_COLUMN_ID:
+             await asyncio.sleep(0.15) # Slightly longer delay might help rendering complete
+             await ui.run_javascript(f'''
+                 const el = getElement({MESSAGES_COLUMN_ID});
+                 if (el) {{ el.scrollTop = el.scrollHeight; }}
+                 else {{ console.warn('Static scroll target element not found:', {MESSAGES_COLUMN_ID}); }}
+             ''')
+         else:
+             print("Error: Static MESSAGES_COLUMN_ID was not captured.")
+
+     async def update_chat_display_ui(refresh_chat_func):
+         """Triggers UI refresh for chat messages and scrolls."""
+         print("UI: Triggering chat_messages_area refresh.") # Debug
+         refresh_chat_func()
+         # Schedule scroll slightly after refresh call returns
+         # Run as background task to not block current function
+         asyncio.create_task(scroll_chat_to_bottom())
+
+     async def select_session(session_id: Optional[str]):
+         """Loads messages via API or clears for new chat."""
+         print(f"UI: Selecting session: {session_id}")
+         # Use local chat_state reference
+         chat_state["current_session_id"] = session_id
+         messages = [] # Default to empty
+         if session_id:
+             session_details = await api_client.api_get_session_details(session_id)
+             if session_details and 'messages' in session_details:
+                 messages = [ # Rebuild message dicts just in case
+                     {'id': msg.get('id'), 'role': msg.get('role'), 'content': msg.get('content')}
+                     for msg in session_details['messages']
+                 ]
+             else:
+                 chat_state["current_session_id"] = None # Reset if load failed
+                 ui.notify("Could not load session details.", type='negative')
+         # Update state explicitly
+         client.storage["chat"] = {**chat_state, "current_messages": messages}
+         await update_chat_display_ui(chat_messages_area.refresh)
+
+
+     async def delete_session_ui(session_id: str, refresh_sessions_func):
+         success = await api_client.api_delete_session(session_id)
+         if success:
+             ui.notify(f"Session deleted.", type='positive')
+             if chat_state["current_session_id"] == session_id:
+                 await select_session(None) # Go to new chat state
+             await update_sessions_list_ui(refresh_sessions_func)
+         else:
+             ui.notify("Error deleting session.", type='negative')
+
+
+     async def send_message(refresh_chat_func, refresh_sessions_func):
+         user_input = chat_input.value
+         if not user_input or chat_state["is_generating"]: return
+         chat_input.set_value(None)
+
+         # Use local chat_state reference
+         current_session_id = chat_state["current_session_id"]
+         print(f"UI: Sending message: '{user_input}' for session: {current_session_id}")
+
+         # 1. Prepare message objects
+         temp_user_msg_id = f"user_{datetime.datetime.now().timestamp()}"
+         user_message = {"role": "user", "content": user_input, "id": temp_user_msg_id}
+         temp_assist_msg_id = f"assist_placeholder_{datetime.datetime.now().timestamp()}"
+         assistant_placeholder = {"role": "assistant", "content": "", "id": temp_assist_msg_id}
+
+         # 2. Update state and UI immediately
+         # Use local chat_state reference for modification
+         chat_state["is_generating"] = True
+         send_button.props('loading').classes('animate-pulse')
+         new_messages_list = chat_state["current_messages"] + [user_message, assistant_placeholder]
+         # Explicitly update client storage
+         client.storage["chat"] = {**chat_state, "current_messages": new_messages_list.copy()}
+         print("UI: Updated state with user message and placeholder.")
+         await update_chat_display_ui(refresh_chat_func)
+
+         # 3. Call API
+         init_response = await api_client.api_initiate_chat(current_session_id, user_input)
+
+         # 4. Handle API Failure
+         if not init_response or "stream_id" not in init_response:
+             ui.notify("Error starting chat.", type='negative')
+             # Remove placeholder from local state copy
+             final_messages = [m for m in chat_state["current_messages"] if m.get('id') != temp_assist_msg_id]
+             # Update client storage
+             client.storage["chat"] = {**chat_state, "current_messages": final_messages, "is_generating": False}
+             send_button.props(remove='loading').classes(remove='animate-pulse')
+             await update_chat_display_ui(refresh_chat_func)
+             print("UI: API initiate chat failed.")
+             return
+
+         # --- API Call Success ---
+         new_session_id = init_response["session_id"]
+         actual_user_message_id = init_response["user_message_id"]
+         stream_id = init_response["stream_id"]
+         print(f"UI: API initiate success. Session: {new_session_id}, Stream: {stream_id}")
+
+         # Update user message ID in state
+         current_msgs = chat_state["current_messages"].copy() # Work with a copy
+         user_msg_updated = False
+         for i, msg in enumerate(current_msgs):
+             if msg.get('id') == temp_user_msg_id:
+                 current_msgs[i] = {**msg, 'id': actual_user_message_id}
+                 user_msg_updated = True
+                 break
+         if user_msg_updated:
+              client.storage["chat"] = {**chat_state, "current_messages": current_msgs} # Update storage
+
+         # Update current session ID and refresh list if it was a new chat
+         if current_session_id is None:
+             client.storage["chat"] = {**chat_state, "current_session_id": new_session_id}
+             await update_sessions_list_ui(refresh_sessions_func)
+
+         # 5. Stream SSE response
+         assistant_response_content = ""
+         placeholder_index = -1
+         try:
+             print(f"UI: Starting SSE stream for {stream_id}")
+             cookies_to_pass = api_client._client.cookies
+             async for token in sse_client.stream_chat_responses(stream_id, cookies=cookies_to_pass):
+                 if token.startswith("[ERROR]"):
+                     assistant_response_content = token
+                     ui.notify(f"Streaming Error: {token}", type='negative', multi_line=True)
+                     break
+
+                 assistant_response_content += token
+
+                 # Update placeholder content in state explicitly
+                 current_msgs = chat_state["current_messages"].copy()
+                 if placeholder_index == -1:
+                      try: placeholder_index = next(i for i, msg in enumerate(current_msgs) if msg.get('id') == temp_assist_msg_id)
+                      except StopIteration: print("ERROR: Could not find placeholder in state!"); break
+
+                 if placeholder_index != -1:
+                      new_placeholder_msg = {**current_msgs[placeholder_index], 'content': assistant_response_content}
+                      current_msgs[placeholder_index] = new_placeholder_msg
+                      client.storage["chat"] = {**chat_state, "current_messages": current_msgs} # Update storage
+                      # Trigger refresh - this might be frequent
+                      refresh_chat_func()
+                      # Minimal delay to allow UI update cycle
+                      await asyncio.sleep(0.02)
+
+             print(f"UI: Finished streaming. Full response length: {len(assistant_response_content)}")
+
+         except Exception as e:
+             print(f"UI SSE Error during streaming loop: {e}")
+             traceback.print_exc()
+             assistant_response_content = f"[ERROR] Failed to stream response: {e}"
+             ui.notify(f"Error streaming response: {e}", type='negative')
+         finally:
+             # 6. Finalize state and UI
+             print("UI: Finalizing message send.")
+             # Get the current state again before modifying
+             current_chat_state = client.storage["chat"]
+             current_msgs = current_chat_state["current_messages"]
+
+             # Remove placeholder and add final message
+             final_messages_list = [m for m in current_msgs if m.get('id') != temp_assist_msg_id]
+             # Get actual assistant message ID from DB? No, backend saved it.
+             # We don't know the final ID here unless we fetch again. Use temp.
+             final_assistant_msg_id = f"assist_final_{datetime.datetime.now().timestamp()}"
+             final_assistant_msg = {"role": "assistant", "content": assistant_response_content, "id": final_assistant_msg_id}
+             final_messages_list.append(final_assistant_msg)
+
+             # Update client storage explicitly
+             client.storage["chat"] = {**current_chat_state,
+                                       "current_messages": final_messages_list,
+                                       "is_generating": False} # Set generating to false HERE
+
+             send_button.props(remove='loading').classes(remove='animate-pulse') # Update button state
+
+             # Final refresh of the chat area
+             await update_chat_display_ui(refresh_chat_func)
+             # Update sessions list timestamp (implicitly happens on next fetch)
+             await update_sessions_list_ui(refresh_sessions_func)
+
+
+
+     # --- Initial Load for the Page ---
+     print("UI: Initial load sequence starting...")
+     await update_sessions_list_ui(sessions_container.refresh)
+     await asyncio.sleep(0.1)
+     # Select first session or new chat on initial load? Defaulting to new.
+     await select_session(chat_state["current_session_id"]) # Load initially selected or new
+     print("UI: Initial load sequence complete.")
+
+# --- Logout Function ---
+async def handle_logout():
+     success = await api_client.api_logout()
+     if success:
+         ui.navigate.to('/')
+     else:
+         ui.notify("Logout failed.", type='negative')
+
+
+# --- Define function to mount UI onto FastAPI ---
+def init_nicegui(fastapi_app: FastAPI):
+     # Pass storage_secret for secure session cookies
+     ui.run_with(
+         fastapi_app,
+         mount_path="/", # Serve NiceGUI at the root
+         storage_secret=os.getenv("SECRET_KEY"),
+         title="AI Chat" # Set browser tab title
+     )
+
+================================================
+File: run.py
+================================================
+# file: run.py
+import uvicorn
+import os
+from dotenv import load_dotenv
+import asyncio # Import asyncio
+
+# Try installing and using winloop for potentially better performance/stability on Windows
+try:
+    import winloop
+    print("Attempting to use winloop event loop policy.")
+    asyncio.set_event_loop_policy(winloop.EventLoopPolicy())
+except ImportError:
+    print("winloop not found, using default asyncio event loop.")
+    pass # Fallback to default if winloop is not installed
+
+# Load environment variables first
+load_dotenv()
+
+# Import the FastAPI app instance from the backend
+from Backend.main import app as fastapi_app
+# Import the NiceGUI initialization function from the frontend
+from Frontend.main import init_nicegui
+
+# Initialize NiceGUI by mounting it onto the FastAPI app
+init_nicegui(fastapi_app)
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000)) # Allow port override via env var
+    host = os.getenv("HOST", "0.0.0.0")
+    reload = os.getenv("RELOAD", "true").lower() == "true" # Allow disabling reload
+
+    # Check if adapter path exists before starting
+    adapter_path = os.getenv("ADAPTER_PATH")
+    if not adapter_path or not os.path.exists(adapter_path):
+         print("-" * 50)
+         print(f"ERROR: LLM Adapter path not found or not set: {adapter_path}")
+         print("Please ensure ADAPTER_PATH in your .env file points to the correct directory.")
+         print("-" * 50)
+         # Optionally exit here if model is critical for startup
+         # import sys
+         # sys.exit(1)
+    else:
+         print(f"Found adapter path: {adapter_path}")
+
+
+    print(f"Starting server on {host}:{port} with reload={'enabled' if reload else 'disabled'}...")
+    uvicorn.run(
+        "run:fastapi_app", # Point to the app instance in *this* run.py file
+        host=host,
+        port=port,
+        reload=reload,
+        reload_dirs=["backend", "frontend"] # Watch backend and frontend folders for changes
+    )
+
