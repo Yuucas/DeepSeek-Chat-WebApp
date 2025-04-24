@@ -71,13 +71,43 @@ async def add_chat_message(db: AsyncSession, session_id: str, role: str, content
     return db_message
 
 async def delete_chat_session(db: AsyncSession, session_id: str, user_id: int):
-     stmt = delete(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
-     result = await db.execute(stmt) # Check if any row was actually deleted
-     if result.rowcount > 0: # Only commit if something was deleted
-        await db.commit()
+    """
+    Deletes a specific chat session and its related messages using ORM cascade.
+    Ensures the user owns the session before deleting.
+    Returns True if deleted, False if not found or not owned.
+    """
+    # 1. Fetch the session object first, ensuring ownership
+    stmt = select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+    result = await db.execute(stmt)
+    session_to_delete = result.scalar_one_or_none()
+
+    if session_to_delete:
+        # 2. Use session.delete() on the ORM object
+        # SQLAlchemy will handle the cascade delete for related ChatMessage objects
+        # because of cascade="all, delete-orphan" on the relationship in models.py
+        await db.delete(session_to_delete)
+        await db.commit() # Commit the deletion of the session and cascaded messages
+        print(f"CRUD: Deleted session {session_id} and its messages via ORM cascade.")
+        return True # Indicate success
+    else:
+        # Session not found or doesn't belong to the user
+        print(f"CRUD: Session {session_id} not found for user {user_id} or already deleted.")
+        return False # Indicate session not found/deleted
 
 async def delete_all_user_sessions(db: AsyncSession, user_id: int):
-     stmt = delete(ChatSession).where(ChatSession.user_id == user_id)
-     result = await db.execute(stmt)
-     if result.rowcount > 0:
-        await db.commit()
+    """
+    Deletes all chat sessions for a user using ORM cascade for messages.
+    """
+    # Fetch all session objects for the user
+    stmt = select(ChatSession).where(ChatSession.user_id == user_id)
+    result = await db.execute(stmt)
+    sessions_to_delete = result.scalars().all()
+
+    if sessions_to_delete:
+        print(f"CRUD: Deleting {len(sessions_to_delete)} sessions for user {user_id} via ORM cascade...")
+        for session in sessions_to_delete:
+            await db.delete(session) # Delete each session object
+        await db.commit() # Commit all deletions
+        print(f"CRUD: Finished deleting sessions for user {user_id}.")
+    else:
+        print(f"CRUD: No sessions found to delete for user {user_id}.")

@@ -115,7 +115,7 @@ async def generate_response_stream(chat_history: List[Dict[str, str]]) -> AsyncG
         generation_kwargs = dict(
             **inputs, # Pass input_ids and attention_mask directly
             stopping_criteria=StoppingCriteriaList([streamer]), # Use our streamer
-            max_new_tokens=500,
+            max_new_tokens=200,
             pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
             do_sample=True,
