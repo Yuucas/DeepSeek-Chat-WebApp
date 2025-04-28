@@ -326,6 +326,7 @@ async def main_chat_page(client: Client):
         chat_state = get_chat_state(client) # Get fresh state on each refresh
         messages_to_render = chat_state.get("current_messages", [])
         print(f"UI: Rendering chat_messages_area. Count: {len(messages_to_render)}")
+        print(f"Message to Render: {messages_to_render}") # Debug
         if not messages_to_render and not chat_state.get("current_session_id"):
              with ui.row().classes('w-full justify-center mt-10'):
                  ui.icon('question_answer', size='xl', color='gray-400')

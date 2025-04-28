@@ -103,24 +103,32 @@ async def generate_response_stream(chat_history: List[Dict[str, str]]) -> AsyncG
 
     try:
         # --- Prepare Prompt and Inputs (same as before) ---
-        MAX_TURNS = 10
+        MAX_TURNS = 25
         truncated_history = chat_history[-MAX_TURNS*2:]
+
+        print(f"LLM - Truncated history length: {truncated_history}") # Debug
+
         formatted_prompt = tokenizer.apply_chat_template(
             truncated_history, tokenize=False, add_generation_prompt=True
         )
+        print(f"LLM - Formatted prompt: {formatted_prompt}") # Debug
+
         inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
         input_length = inputs.input_ids.shape[1] # Get length of prompt tokens
+
+        print(f"Tokenizer Pad Token ID: {tokenizer.pad_token_id}, Eos Token ID: {tokenizer.eos_token_id}") # Debug
 
         # --- Generation Arguments ---
         generation_kwargs = dict(
             **inputs, # Pass input_ids and attention_mask directly
             stopping_criteria=StoppingCriteriaList([streamer]), # Use our streamer
-            max_new_tokens=200,
+            max_new_tokens=300,
             pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
             do_sample=True,
-            temperature=0.5,
+            temperature=0.6,
             top_p=0.9,
+            repetition_penalty=1.25
             # streamer=streamer, # REMOVE TextIteratorStreamer argument
         )
 
@@ -174,6 +182,8 @@ async def generate_response_stream(chat_history: List[Dict[str, str]]) -> AsyncG
                  # print(f"LLM - Yielding decoded part: >>{new_part}<<") # Debug
                  yield new_part
                  decoded_text = new_decoded_text # Update the previously decoded text
+
+                 print(f"Decoded Text : {decoded_text}")
 
             await asyncio.sleep(0.01) # Small yield
 
