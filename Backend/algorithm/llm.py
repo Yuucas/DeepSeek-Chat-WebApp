@@ -65,7 +65,8 @@ def load_llm():
         quantization_config=bnb_config if USE_QUANTIZATION else None,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        device_map="auto"
+        device_map="auto",
+        attn_implementation="eager"
     )
 
     # --- Load Adapter (same as before) ---
@@ -90,7 +91,7 @@ def load_llm():
         tokenizer=tokenizer,
         device_map="auto", # Or specify device if needed
         # --- Set generation parameters here ---
-        max_new_tokens=400, # Default max, can be overridden in call
+        max_new_tokens=250, # Default max, can be overridden in call
         temperature=0.6,
         top_p=0.9,
         top_k=50,
