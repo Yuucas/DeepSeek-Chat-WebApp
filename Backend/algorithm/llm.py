@@ -91,7 +91,7 @@ def load_llm():
         tokenizer=tokenizer,
         device_map="auto", # Or specify device if needed
         # --- Set generation parameters here ---
-        max_new_tokens=250, # Default max, can be overridden in call
+        max_new_tokens=300, # Default max, can be overridden in call
         temperature=0.6,
         top_p=0.9,
         top_k=50,
@@ -134,17 +134,31 @@ async def generate_lc_response_stream(chat_history: List[Dict[str, str]]) -> Asy
 
     try:
         # --- History Truncation (Keep this) ---
-        MAX_TURNS = 10
+        MAX_TURNS = 5
         truncated_history_dicts = chat_history[-MAX_TURNS*2:]
         print(f"LLM (LC) - Truncated history length: {len(truncated_history_dicts)}")
 
         # --- Convert history to LangChain messages ---
         lc_messages = _convert_history_to_lc_messages(truncated_history_dicts)
 
-        # --- Use LangChain's async streaming ---
-        # The HuggingFacePipeline wrapper might handle prompt formatting implicitly,
-        # or you might need a prompt template depending on the exact model base.
-        # Let's try passing the messages directly first.
+        
+        # --- Optional: Log the prompt string the model actually sees ---
+        # This helps verify if the template adds anything weird.
+        try:
+            # Note: add_generation_prompt=False prevents adding the usual assistant prompt turn
+            # if the template requires explicit roles for generation. Set to True if needed.
+            # Set add_special_tokens based on model requirements (usually True for chat)
+            formatted_prompt = tokenizer.apply_chat_template(
+                lc_messages,
+                tokenize=False,
+                add_generation_prompt=True # Usually True for generation
+            )
+            print(f"LLM (LC) - Formatted prompt for model:\n-------\n{formatted_prompt}\n-------")
+        except Exception as template_err:
+            print(f"LLM (LC) - Warning: Could not apply chat template for logging: {template_err}")
+        # --- End Optional Logging ---
+
+
         token_count = 0
         async for chunk in lc_llm.astream(lc_messages):
             # chunk is typically a string token when streaming from HF pipeline
