@@ -91,7 +91,7 @@ def load_llm():
         device_map="auto", # Or specify device if needed
         # --- Set generation parameters here ---
         max_new_tokens=400, # Default max, can be overridden in call
-        temperature=0.4,
+        temperature=0.6,
         top_p=0.9,
         top_k=50,
         repetition_penalty=1.25,

@@ -23,7 +23,6 @@ async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) 
             response.raise_for_status() # Check for initial connection errors
 
             async for line in response.aiter_lines():
-                print(f"SSE Raw Line: {line}") # Debug
 
                 if line.startswith("data:"):
                     prefix = "data: "
