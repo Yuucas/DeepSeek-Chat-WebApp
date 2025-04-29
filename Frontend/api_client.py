@@ -115,10 +115,13 @@ async def api_initiate_chat(session_id: Optional[str], user_message: str) -> Opt
      """Calls backend to start chat generation."""
      try:
          payload = {"session_id": session_id, "user_message": user_message}
-         response = await _client.post("api/chat/initiate", json=payload)
+
+         response = await _client.post("/api/chat/initiate", json=payload)
+
          if response.status_code == 401: return None
          response.raise_for_status()
          return response.json() # Returns {session_id, user_message_id, stream_id}
+     
      except Exception as e:
          print(f"Initiate chat error: {e}")
          return None

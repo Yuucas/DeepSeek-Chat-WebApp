@@ -23,9 +23,19 @@ async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) 
             response.raise_for_status() # Check for initial connection errors
 
             async for line in response.aiter_lines():
-                # print(f"SSE Raw Line: {line}") # Debug
+                print(f"SSE Raw Line: {line}") # Debug
+
                 if line.startswith("data:"):
-                    data = line[len("data:"):].strip()
+                    prefix = "data: "
+                    if line.startswith(prefix):
+                        data = line[len(prefix):]
+                    elif line.startswith("data:"): # Handle case with no space after colon
+                        data = line[len("data:"):]
+                    else: # Should not happen if line starts with "data:"
+                        continue # Skip malformed lines
+
+                    print(f"SSE Extracted Data (No Strip): '{data}'") # Log extracted data WITHOUT strip
+
                     if data == "[DONE]": # Optional: Handle explicit done signal
                         print("SSE: Received [DONE] signal.")
                         break
@@ -35,7 +45,7 @@ async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) 
                          break
                     else:
                         yield data # Yield the actual token/message
-                # Handle other SSE fields like 'event:' or 'id:' if needed
+
 
     except httpx.RequestError as e:
         print(f"SSE Request Error: {e}")

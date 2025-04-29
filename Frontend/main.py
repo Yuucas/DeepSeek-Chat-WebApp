@@ -1,5 +1,6 @@
 # file: Frontend/main.py
 import os
+import html
 import traceback
 from fastapi import FastAPI
 from nicegui import ui, app, Client
@@ -129,6 +130,7 @@ async def handle_send_message(client: Client, chat_input: ui.input, send_button:
     temp_assist_msg_id = f"{ASSISTANT_PLACEHOLDER_ID_PREFIX}{datetime.datetime.now().timestamp()}"
     assistant_placeholder = {"role": "assistant", "content": "", "id": temp_assist_msg_id}
 
+    # --- Explicit State Update ---
     new_messages_list = chat_state["current_messages"] + [user_message, assistant_placeholder]
     update_chat_state(client, current_messages=new_messages_list.copy(), is_generating=True) # Use copy
     send_button.props('loading').classes('animate-pulse')
@@ -162,7 +164,6 @@ async def handle_send_message(client: Client, chat_input: ui.input, send_button:
     if user_msg_updated: update_chat_state(client, current_messages=current_msgs)
 
     # Update session list and current ID if it was a new chat
-    # Also update title based on first message
     if current_session_id is None:
         update_chat_state(client, current_session_id=new_session_id, current_title=user_input[:50])
         await update_sessions_list(client, sessions_refresh_func)
@@ -178,16 +179,21 @@ async def handle_send_message(client: Client, chat_input: ui.input, send_button:
                 assistant_response_content = token; ui.notify(f"Streaming Error: {token}"); break
             assistant_response_content += token
 
-            # Update placeholder content in state explicitly
+            # --- Explicitly update placeholder content in state ---
             current_msgs = get_chat_state(client)["current_messages"].copy()
             if placeholder_index == -1:
                  try: placeholder_index = next(i for i, msg in enumerate(current_msgs) if msg.get('id') == temp_assist_msg_id)
                  except StopIteration: print("ERROR: Placeholder not found!"); break
             if placeholder_index != -1:
-                 current_msgs[placeholder_index] = {**current_msgs[placeholder_index], 'content': assistant_response_content}
-                 update_chat_state(client, current_messages=current_msgs) # Update storage
-                 chat_refresh_func() # Trigger refresh directly
-                 await asyncio.sleep(0.02) # Yield control
+                # Create a *new* dict for the updated message
+                updated_placeholder = {**current_msgs[placeholder_index], 'content': assistant_response_content}
+                # Create a *new* list with the updated message
+                new_messages_list = current_msgs[:placeholder_index] + [updated_placeholder] + current_msgs[placeholder_index+1:]
+                # Update the state with the new list
+                update_chat_state(client, current_messages=new_messages_list)
+                # Trigger refresh
+                chat_refresh_func()
+                await asyncio.sleep(0.02) # Yield control
 
         print(f"UI Helper: Finished streaming. Length: {len(assistant_response_content)}")
     except Exception as e:
@@ -200,14 +206,13 @@ async def handle_send_message(client: Client, chat_input: ui.input, send_button:
         current_msgs = current_chat_state["current_messages"]
         # Remove placeholder and add final message
         final_messages_list = [m for m in current_msgs if m.get('id') != temp_assist_msg_id]
-        # Use placeholder ID for final message until backend confirms save & returns ID
         final_assistant_msg_id = f"assist_final_{datetime.datetime.now().timestamp()}"
         final_assistant_msg = {"role": "assistant", "content": assistant_response_content, "id": final_assistant_msg_id}
         final_messages_list.append(final_assistant_msg)
         # Update state, setting generating to false
         update_chat_state(client, current_messages=final_messages_list, is_generating=False)
-        send_button.props(remove='loading').classes(remove='animate-pulse') # Update button state
-        # Final refresh of the chat area
+        send_button.props(remove='loading').classes(remove='animate-pulse')
+        # Final refresh and scroll
         await update_chat_display(client, chat_refresh_func, messages_column_id)
         # Update sessions list timestamp
         await update_sessions_list(client, sessions_refresh_func)
@@ -327,39 +332,65 @@ async def main_chat_page(client: Client):
         messages_to_render = chat_state.get("current_messages", [])
         print(f"UI: Rendering chat_messages_area. Count: {len(messages_to_render)}")
         print(f"Message to Render: {messages_to_render}") # Debug
-        if not messages_to_render and not chat_state.get("current_session_id"):
-             with ui.row().classes('w-full justify-center mt-10'):
-                 ui.icon('question_answer', size='xl', color='gray-400')
-             ui.label("Select a chat or start a new one.").classes('w-full text-center text-gray-500 mt-2')
-        else:
-            for msg_data in messages_to_render:
-                try:
-                    role = msg_data.get('role', 'unknown')
-                    content = msg_data.get('content', '')
-                    is_user = role == 'user'
-                    name = role.capitalize()
-                    is_loading = (role == 'assistant' and
-                                  chat_state.get("is_generating", False) and
-                                  str(msg_data.get('id', '')).startswith(ASSISTANT_PLACEHOLDER_ID_PREFIX))
 
-                    with ui.chat_message(name=name, sent=is_user):
-                        if is_loading:
-                             with ui.row().classes('items-center'):
-                                 ui.spinner(size='sm').classes('mr-2')
-                                 # ui.label('Generating...') # Optional text
-                        else:
-                             # Render actual content only if not loading placeholder
-                             ui.markdown(content)
-                except Exception as e: print(f"ERROR render message: {e}"); traceback.print_exc()
+        if not messages_to_render and not chat_state.get("current_session_id"):
+            with ui.column().classes('w-full h-full justify-center items-center text-gray-400'):
+                 ui.icon('question_answer', size='xl')
+                 ui.label("Select a chat or start a new one.")
+        elif not messages_to_render and chat_state.get("current_session_id"):
+             with ui.column().classes('w-full h-full justify-center items-center text-gray-400'):
+                 ui.icon('chat', size='xl')
+                 ui.label("Send a message to start the chat!").classes('mt-2')
+
+        with ui.column().classes('w-full gap-3 px-4 pt-4 pb-2'): # Add padding/gap
+                for msg_data in messages_to_render:
+                    try:
+                        role = msg_data.get('role', 'unknown')
+                        raw_content = msg_data.get('content', '') # Get raw content
+                        is_user = role == 'user'
+                        name = role.capitalize()
+                        is_loading = (role == 'assistant' and
+                                    chat_state.get("is_generating", False) and
+                                    str(msg_data.get('id', '')).startswith(ASSISTANT_PLACEHOLDER_ID_PREFIX))
+
+                        with ui.chat_message(name=name, sent=is_user):
+                            # --- Prepare content for HTML display ---
+                            # Escape HTML special characters for security!
+                            escaped_content = html.escape(raw_content)
+
+                            # Define the style for the <pre> tag
+                            # white-space: pre-wrap; -> preserves whitespace, wraps lines
+                            # word-wrap: break-word; -> breaks long words if needed
+                            # font-family: monospace; -> terminal-like font
+                            # margin: 0; -> remove default pre margins
+                            pre_style = "white-space: pre-wrap; word-wrap: break-word; font-family: monospace; margin: 0;"
+
+                            # Construct the HTML string
+                            html_content = f'<pre style="{pre_style}">{escaped_content}</pre>'
+                            # --- End preparation ---
+                            if is_loading:
+                                with ui.row().classes('items-center'):
+                                    ui.spinner(size='sm').classes('mr-2')
+                                    # Display streaming raw content using ui.html
+                                    if raw_content:
+                                        ui.html(html_content) # Use the prepared HTML
+                            else:
+                                # --- Display RAW content using ui.html with <pre> ---
+                                ui.html(html_content) # Use the prepared HTML
+                                # --- End Raw Display ---
+                    except Exception as e: print(f"ERROR render message: {e}"); traceback.print_exc()
 
     # --- Build Page Layout ---
     # Header
-    with ui.header(elevated=True).classes('justify-between items-center px-4'):
-        # Bind title from state
-        ui.label().bind_text_from(client.storage['chat'], 'current_title',
-                                  backward=lambda t=chat_state.get("current_title", "New Chat"): t or "New Chat") \
-                  .classes('text-lg font-semibold')
-        ui.button("Logout", on_click=handle_logout_click, icon='logout').props('flat color=white')
+    with ui.header(elevated=True).classes('items-center justify-between'):
+        with ui.row().classes('items-center'):
+             # Button to toggle left drawer
+             ui.button(icon='menu', on_click=lambda: left_drawer.toggle()).props('flat round dense color=white')
+             # Bind title from state
+             ui.label().bind_text_from(client.storage['chat'], 'current_title',
+                                     backward=lambda t=get_chat_state(client).get("current_title", "New Chat"): t or "New Chat") \
+                     .classes('text-lg font-semibold ml-2')
+        ui.button("Logout", on_click=lambda: handle_logout_click(client), icon='logout').props('flat color=white') # Pass client
 
     # Left Drawer
     with ui.left_drawer(value=True, bordered=True).classes('bg-gray-100 w-64') as left_drawer:
@@ -367,24 +398,25 @@ async def main_chat_page(client: Client):
             ui.button("New Chat", icon="add_comment",
                       on_click=lambda: select_chat_session(client, None, chat_messages_area.refresh, MESSAGES_COLUMN_ID)).classes('w-full mb-2')
             ui.label("History").classes('text-base font-medium mb-1 text-gray-600 px-2')
-            ui.separator()
+            ui.separator().classes('mb-2')
             # Call the refreshable function to render the initial list
-            await sessions_container()
+            await sessions_container() # Render sessions list
 
-    # Main Content Area
-    with ui.column().classes('w-full h-screen'): # Main column takes full height
-        # Static scroll container fills remaining space
-        messages_column = ui.column().classes('w-full flex-grow overflow-y-auto px-4 pt-4 pb-4') # Use flex-grow
-        MESSAGES_COLUMN_ID = messages_column.id # Capture ID
+    with ui.column().classes('w-full h-screen relative'): # Main area takes full height
+        # Static scroll container fills remaining space, added padding
+        messages_column = ui.column().classes('w-full flex-grow overflow-y-auto pb-20') # Use flex-grow
+        MESSAGES_COLUMN_ID = messages_column.id
         with messages_column:
             # Call the refreshable function to render initial messages
             chat_messages_area()
 
         # Input Area at the bottom
         ui.separator()
-        with ui.row().classes('w-full p-3 bg-gray-50 items-center border-t'): # Changed bg slightly
-            chat_input = ui.input(placeholder="Type your message...").classes('flex-grow').props('outlined dense') \
-                .on('keydown.enter', lambda: handle_send_message(client, chat_input, send_button, chat_messages_area.refresh, sessions_container.refresh, MESSAGES_COLUMN_ID))
+        with ui.row().classes('w-full p-2 bg-gray-50 items-center border-t'):
+            chat_input = ui.textarea(placeholder="Type your message...") \
+                .classes('flex-grow') \
+                .props('outlined dense rows=1 max-rows=5 autogrow clearable') \
+                .on('keydown.enter', lambda e: handle_send_message(client, chat_input, send_button, chat_messages_area.refresh, sessions_container.refresh, MESSAGES_COLUMN_ID) if not e.args['shiftKey'] else None, throttle=0.1) # Send on Enter unless Shift+Enter
             send_button = ui.button(icon='send').props('flat round dense') \
                 .on('click', lambda: handle_send_message(client, chat_input, send_button, chat_messages_area.refresh, sessions_container.refresh, MESSAGES_COLUMN_ID))
 

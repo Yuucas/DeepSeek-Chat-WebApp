@@ -68,12 +68,17 @@ async def api_delete_session(session_id: str, user_id: int = Depends(get_current
 stream_contexts: Dict[str, Dict] = {} # Store context info
 
 @router.post("/chat/initiate", response_model=InitiateChatResponseApi)
-async def api_initiate_chat(request_data: InitiateChatRequestApi, user_id: int = Depends(get_current_user_id_from_session), db: AsyncSession = Depends(get_db_session)):
+async def api_initiate_chat(
+    request_data: InitiateChatRequestApi,
+    user_id: int = Depends(get_current_user_id_from_session),
+    db: AsyncSession = Depends(get_db_session)
+):
     if llm.model is None: raise HTTPException(status_code=503, detail="LLM not loaded")
     session_id = request_data.session_id
     user_message_content = request_data.user_message
 
-    async with db.begin(): # Use transaction for create/add message
+    # Use transaction block for session creation AND message adding
+    async with db.begin():
         if session_id:
             session = await crud.get_session_by_id(db, session_id=session_id, user_id=user_id)
             if not session: raise HTTPException(status_code=404, detail="Session not found")
@@ -82,66 +87,100 @@ async def api_initiate_chat(request_data: InitiateChatRequestApi, user_id: int =
             session_id = session.id
             print(f"API: Created new session {session_id} for user {user_id}")
 
-        user_message = await crud.add_chat_message(db, session_id=session_id, role="user", content=user_message_content)
-        # No explicit commit needed here due to db.begin()
+        user_message = await crud.add_chat_message(
+            db, session_id=session_id, role="user", content=user_message_content
+        )
+        # No explicit commit needed here, db.begin() handles it on successful block exit
 
-    # Fetch history *after* commit ensures user message is included
+    # Fetch history *after* transaction is committed
     updated_session = await crud.get_session_by_id(db, session_id=session_id, user_id=user_id)
+    # Ensure messages are loaded (selectinload should handle this, but double-check if issues persist)
+    if not updated_session or not hasattr(updated_session, 'messages'):
+         raise HTTPException(status_code=500, detail="Failed to load session messages after update")
+
     history_for_llm = [{"role": msg.role, "content": msg.content} for msg in updated_session.messages]
-    print(f"History for LLM ({len(history_for_llm)} messages)")
+    print(f"History for LLM ({len(history_for_llm)} messages): {history_for_llm}") # Log history
 
     stream_id = str(uuid.uuid4())
-    stream_contexts[stream_id] = {'history': history_for_llm, 'session_id': session_id}
+    stream_contexts[stream_id] = {'history': history_for_llm, 'session_id': session_id, 'user_id': user_id}
     print(f"API: Initiated stream {stream_id} for session {session_id}")
 
     return InitiateChatResponseApi(session_id=session_id, user_message_id=user_message.id, stream_id=stream_id)
 
 @router.get("/chat/stream/{stream_id}")
 async def api_stream_chat(stream_id: str):
+    """Handles the SSE connection, filters <think> tags, and streams the final response."""
     print(f"API: SSE connection requested for stream ID: {stream_id}")
-    if llm.model is None: raise HTTPException(status_code=503, detail="LLM not loaded")
+
+    # LLM object check now implicitly checks if lc_llm is loaded via llm.py
+    if llm.lc_llm is None: # Check the LangChain LLM object
+         raise HTTPException(status_code=503, detail="LLM not loaded yet")
+
     context = stream_contexts.pop(stream_id, None)
-    if not context: raise HTTPException(status_code=404, detail="Stream session expired/not found")
+    if not context:
+         print(f"API: Stream ID {stream_id} not found or already processed.")
+         raise HTTPException(status_code=404, detail="Stream session not found or expired")
 
     history = context['history']
     session_id = context['session_id']
+    user_id = context['user_id']
 
     async def event_generator():
+        """Generator yields tokens AFTER the last </think> tag and saves that part."""
         full_response = ""
         llm_error_occurred = False
+
+
         try:
-            async for token in llm.generate_response_stream(history):
+            token_count = 0
+            print(f"API: Starting LangChain LLM stream for {stream_id}")
+            async for token in llm.generate_lc_response_stream(history):
+                token_count += 1
+                # print(f"API: Received token from LLM stream: '{token}'") # Optional debug
+
                 if "[ERROR]" in token:
-                    full_response = token; llm_error_occurred = True
-                    yield f"data: {token}\n\n"; break
+                    print(f"API: LLM Error received via LangChain stream {stream_id}: {token}")
+                    full_response = token # Store error message
+                    llm_error_occurred = True
+                    yield f"data: {token}\n\n" # Send error to client
+                    break
+
+                # --- Yield token directly (NO filtering) ---
                 full_response += token
-                yield f"data: {token}\n\n"
+                sse_data = f"data: {token}\n\n"
+                # print(f"API: Yielding SSE data: {sse_data.strip()}") # Optional debug
+                yield sse_data
+                # --- End direct yield ---
+
                 await asyncio.sleep(0.01)
-            print(f"API: Streaming finished for {stream_id}.")
+
+            print(f"API: LangChain Streaming finished for {stream_id}. Tokens received: {token_count}.")
+
         except Exception as e:
             llm_error_occurred = True
-            full_response = f"[ERROR] Streaming generator error: {e}"
+            full_response = f"[ERROR] Streaming failed unexpectedly in generator: {e}"
             print(f"API: Error during event_generator for {stream_id}: {e}")
-            traceback.print_exc()
             try: yield f"data: {full_response}\n\n"
-            except Exception: pass # Ignore client disconnect during error yield
+            except Exception: pass
         finally:
-            # Save assistant message AFTER streaming
-            if not llm_error_occurred and full_response.strip():
-                print(f"API: Saving assistant response for session {session_id}.")
+            # --- Save the FULL raw response (or error) ---
+            final_content_to_save = full_response.strip() # Use the raw response
+
+            if not llm_error_occurred and final_content_to_save:
+                print(f"API: Attempting to save FULL response for session {session_id}. Length: {len(final_content_to_save)}")
                 try:
-                    async with async_session_maker() as db_session: # New session
-                        async with db_session.begin(): # New transaction
-                            await crud.add_chat_message(db_session, session_id, "assistant", full_response)
-                        print(f"API: Saved assistant message for session {session_id}")
+                    async with async_session_maker() as db_session:
+                        async with db_session.begin():
+                            await crud.add_chat_message(db_session, session_id, "assistant", final_content_to_save)
+                        print(f"API: Successfully saved FULL assistant message for session {session_id}")
                 except Exception as db_err:
-                    print(f"API: CRITICAL - Failed to save assistant message for session {session_id}: {db_err}")
-                    traceback.print_exc()
-                    try: yield f"data: [ERROR] DB Save Failed.\n\n"
-                    except Exception: pass
-            elif not full_response.strip(): print(f"API: No response generated for {stream_id}, not saving.")
-            else: print(f"API: Skipping DB save due to error for {stream_id}.")
-            # Context already popped
+                    print(f"API: CRITICAL - Failed to save FULL assistant message for session {session_id}: {db_err}")
+                    # try: yield f"data: [ERROR] Failed to save response to DB.\n\n"
+                    # except Exception: pass
+            elif not final_content_to_save and not llm_error_occurred:
+                 print(f"API: No response generated for stream {stream_id}, not saving.")
+            else: # Error occurred
+                print(f"API: Skipping DB save due to error or empty response for stream {stream_id}.")
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -1,3 +1,6 @@
 *.env
 *.nicegui
 *__pycache__
+*file_combiner.py
+*file_combiner_prompt.txt
+*DeepSeek-Chat.txt
