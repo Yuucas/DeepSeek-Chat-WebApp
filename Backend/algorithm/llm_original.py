@@ -1,3 +1,4 @@
+# file: Backend/algorithm/llm.py
 import os
 import torch
 from transformers import (
@@ -22,9 +23,9 @@ load_dotenv()
 BASE_MODEL_ID = os.getenv("BASE_MODEL_ID")
 ADAPTER_PATH = os.getenv("ADAPTER_PATH")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-USE_QUANTIZATION = True
+USE_QUANTIZATION = False
 bnb_config = None
+
 USE_ADAPTER = False
 
 if not BASE_MODEL_ID or not ADAPTER_PATH:
@@ -67,37 +68,33 @@ def load_llm():
         attn_implementation="eager"
     )
 
-    # --- Conditionally Load Adapter ---
-    if USE_ADAPTER:
-        print(f"LLM - Loading LoRA adapter from: {ADAPTER_PATH}")
-        if not os.path.exists(ADAPTER_PATH):
-            raise FileNotFoundError(f"LLM - Adapter path not found: {ADAPTER_PATH}")
-        try:
-            # Assign loaded PEFT model to the global 'model' variable
-            print("LLM - Applying PEFT adapter to base model...")
-            model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
-            model.eval()
-            print("LLM - PEFT Model loaded and assigned successfully.")
-        except Exception as e:
-            print(f"LLM - Error loading PEFT adapter: {e}")
-            raise e
-    else:
-        # If not using adapter, assign the base model directly to the global 'model' variable
-        print("LLM - Skipping adapter loading. Using BASE MODEL directly.")
-        model = base_model # <<< Assign base model here
+    # --- Load Adapter (same as before) ---
+    print(f"LLM - Loading LoRA adapter from: {ADAPTER_PATH}")
+    if not os.path.exists(ADAPTER_PATH):
+        raise FileNotFoundError(f"LLM - Adapter path not found: {ADAPTER_PATH}")
+    try:
+        # Assign loaded PEFT model to the global 'model' variable
+        model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
+        model.eval()
+        print("LLM - PEFT Model loaded successfully.")
+    except Exception as e:
+        print(f"LLM - Error loading PEFT adapter: {e}")
+        raise e
 
     # --- Create Transformers Pipeline ---
+    # Ensure the loaded PEFT model is used here
     print("LLM - Creating Transformers pipeline...")
     pipe = pipeline(
         "text-generation",
-        model=model, 
+        model=model, # Use the loaded PEFT model
         tokenizer=tokenizer,
-        device_map="auto", 
-        max_new_tokens=600, 
-        temperature=0.4,
+        device_map="auto", # Or specify device if needed
+        # --- Set generation parameters here ---
+        max_new_tokens=500, # Default max, can be overridden in call
+        temperature=0.5,
         top_p=0.9,
         top_k=50,
-        repetition_penalty=1.2,
+        repetition_penalty=1.25,
         do_sample=True,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
@@ -147,18 +144,18 @@ async def generate_lc_response_stream(chat_history: List[Dict[str, str]]) -> Asy
         # --- Optional: Log the prompt string the model actually sees ---
         # This helps verify if the template adds anything weird.
         try:
-            # Attempt to format using the tokenizer's template logic
-            formatted_prompt_for_debug = tokenizer.apply_chat_template(
-                conversation=[msg.to_dict() for msg in lc_messages], # Convert LangChain messages back to dicts
+            # Note: add_generation_prompt=False prevents adding the usual assistant prompt turn
+            # if the template requires explicit roles for generation. Set to True if needed.
+            # Set add_special_tokens based on model requirements (usually True for chat)
+            formatted_prompt = tokenizer.apply_chat_template(
+                lc_messages,
                 tokenize=False,
-                add_generation_prompt=True # Important for assistant response
+                add_generation_prompt=True # Usually True for generation
             )
-            print(f"\n------ LANGCHAIN FORMATTED PROMPT ------\n{formatted_prompt_for_debug}\n-------------------------------------\n")
-        except Exception as e:
-            print(f"\n------ ERROR APPLYING CHAT TEMPLATE: {e} ------\n")
-            # Fallback: Simple manual formatting for debug viewing
-            simple_prompt = "\n".join([f"{msg.type.upper()}: {msg.content}" for msg in lc_messages]) + "\nASSISTANT:"
-            print(f"\n------ SIMPLE CONCATENATED PROMPT (for debug) ------\n{simple_prompt}\n-------------------------------------\n")
+            print(f"LLM (LC) - Formatted prompt for model:\n-------\n{formatted_prompt}\n-------")
+        except Exception as template_err:
+            print(f"LLM (LC) - Warning: Could not apply chat template for logging: {template_err}")
+        # --- End Optional Logging ---
 
 
         token_count = 0

@@ -35,5 +35,6 @@ def init_nicegui(fastapi_app: FastAPI):
          fastapi_app,
          mount_path="/",
          storage_secret=os.getenv("SECRET_KEY"),
-         title="AI Chat"
+         title="AI Chat",
+         dark=True,
      )

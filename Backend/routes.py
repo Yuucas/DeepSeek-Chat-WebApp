@@ -123,7 +123,6 @@ async def api_stream_chat(stream_id: str):
 
     history = context['history']
     session_id = context['session_id']
-    user_id = context['user_id']
 
     async def event_generator():
         """Generator yields tokens AFTER the last </think> tag and saves that part."""

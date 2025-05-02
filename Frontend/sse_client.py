@@ -33,7 +33,7 @@ async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) 
                     else: # Should not happen if line starts with "data:"
                         continue # Skip malformed lines
 
-                    print(f"SSE Extracted Data (No Strip): '{data}'") # Log extracted data WITHOUT strip
+                    # print(f"SSE Extracted Data (No Strip): '{data}'") # Log extracted data WITHOUT strip
 
                     if data == "[DONE]": # Optional: Handle explicit done signal
                         print("SSE: Received [DONE] signal.")

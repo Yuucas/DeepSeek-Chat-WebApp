@@ -213,7 +213,7 @@ async def handle_main_chat_page(client: Client):
                         session_id = session_data.get('id')
                         is_selected = session_id == current_session_id
                         base_classes = 'w-full items-center cursor-pointer p-2 rounded text-sm'
-                        selected_classes = ' bg-blue-100 text-blue-800' if is_selected else ' hover:bg-gray-200'
+                        selected_classes = ' hover:bg-red-900'
                         with ui.row().classes(base_classes + selected_classes) \
                             .on('click', lambda s_id=session_id: select_chat_session(client, s_id, chat_messages_area.refresh, MESSAGES_COLUMN_ID)):
                             with ui.column().classes('flex-grow gap-0'):
@@ -247,47 +247,33 @@ async def handle_main_chat_page(client: Client):
                  ui.icon('chat', size='xl')
                  ui.label("Send a message to start the chat!").classes('mt-2')
 
-        with ui.column().classes('w-full gap-3 px-4 pt-4 pb-2'): # Add padding/gap
-                for msg_data in messages_to_render:
-                    try:
-                        role = msg_data.get('role', 'unknown')
-                        raw_content = msg_data.get('content', '') # Get raw content
-                        is_user = role == 'user'
-                        name = role.capitalize()
-                        is_loading = (role == 'assistant' and
-                                    chat_state.get("is_generating", False) and
-                                    str(msg_data.get('id', '')).startswith(ASSISTANT_PLACEHOLDER_ID_PREFIX))
+        for msg_data in messages_to_render:
+             try:
+                 # ... (your message rendering logic using ui.chat_message and ui.html) ...
+                 role = msg_data.get('role', 'unknown')
+                 raw_content = msg_data.get('content', '')
+                 is_user = role == 'user'
+                 name = role.capitalize()
+                 is_loading = (role == 'assistant' and
+                             chat_state.get("is_generating", False) and
+                             str(msg_data.get('id', '')).startswith(ASSISTANT_PLACEHOLDER_ID_PREFIX))
 
-                        with ui.chat_message(name=name, sent=is_user):
-                            # --- Prepare content for HTML display ---
-                            # Escape HTML special characters for security!
-                            escaped_content = html.escape(raw_content)
-
-                            # Define the style for the <pre> tag
-                            # white-space: pre-wrap; -> preserves whitespace, wraps lines
-                            # word-wrap: break-word; -> breaks long words if needed
-                            # font-family: monospace; -> terminal-like font
-                            # margin: 0; -> remove default pre margins
-                            pre_style = "white-space: pre-wrap; word-wrap: break-word; font-family: monospace; margin: 0;"
-
-                            # Construct the HTML string
-                            html_content = f'<pre style="{pre_style}">{escaped_content}</pre>'
-                            # --- End preparation ---
-                            if is_loading:
-                                with ui.row().classes('items-center'):
-                                    ui.spinner(size='sm').classes('mr-2')
-                                    # Display streaming raw content using ui.html
-                                    if raw_content:
-                                        ui.html(html_content) # Use the prepared HTML
-                            else:
-                                # --- Display RAW content using ui.html with <pre> ---
-                                ui.html(html_content) # Use the prepared HTML
-                                # --- End Raw Display ---
-                    except Exception as e: print(f"ERROR render message: {e}"); traceback.print_exc()
+                 with ui.chat_message(name=name, sent=is_user):
+                     escaped_content = html.escape(raw_content)
+                     pre_style = "white-space: pre-wrap; word-wrap: break-word; font-family: monospace; margin: 0;"
+                     html_content = f'<pre style="{pre_style}">{escaped_content}</pre>'
+                     if is_loading:
+                         with ui.row().classes('items-center'):
+                             ui.spinner(size='sm').classes('mr-2')
+                             if raw_content:
+                                 ui.html(html_content)
+                     else:
+                         ui.html(html_content)
+             except Exception as e: print(f"ERROR render message: {e}"); traceback.print_exc()
 
     # --- Build Page Layout ---
     # Header
-    with ui.header(elevated=True).classes('items-center justify-between'):
+    with ui.header(elevated=True).classes('items-center justify-between bg-[#40040b] text-white'):
         with ui.row().classes('items-center'):
              # Button to toggle left drawer
              ui.button(icon='menu', on_click=lambda: left_drawer.toggle()).props('flat round dense color=white')
@@ -295,41 +281,59 @@ async def handle_main_chat_page(client: Client):
              ui.label().bind_text_from(client.storage['chat'], 'current_title',
                                      backward=lambda t = utils.get_chat_state(client).get("current_title", "New Chat"): t or "New Chat") \
                      .classes('text-lg font-semibold ml-2')
-        ui.button("Logout", on_click=lambda: handle_logout_click(client), icon='logout').props('flat color=white') # Pass client
+        ui.button("Logout", on_click=lambda: handle_logout_click(), icon='logout').props('flat color=white') # Pass client
 
     # Left Drawer
-    with ui.left_drawer(value=True, bordered=True).classes('bg-gray-100 w-64') as left_drawer:
-        with ui.column().classes('w-full p-2'):
+    with ui.left_drawer(fixed=False, value=False, bordered=True).classes('w-64') as left_drawer:
+        with ui.column().classes('w-full h-full'):
             ui.button("New Chat", icon="add_comment",
-                      on_click=lambda: select_chat_session(client, None, chat_messages_area.refresh, MESSAGES_COLUMN_ID)).classes('w-full mb-2')
+                      on_click=lambda: select_chat_session(client, None, chat_messages_area.refresh, MESSAGES_COLUMN_ID), color='#40040b').classes('w-full mb-2')
             ui.label("History").classes('text-base font-medium mb-1 text-gray-600 px-2')
             ui.separator().classes('mb-2')
             # Call the refreshable function to render the initial list
             await sessions_container() # Render sessions list
 
-    with ui.column().classes('w-full h-screen relative'): # Main area takes full height
-        # Static scroll container fills remaining space, added padding
-        messages_column = ui.column().classes('w-full flex-grow overflow-y-auto pb-20') # Use flex-grow
-        MESSAGES_COLUMN_ID = messages_column.id
-        with messages_column:
-            # Call the refreshable function to render initial messages
-            chat_messages_area()
 
-        # Input Area at the bottom
-        ui.separator()
-        with ui.row().classes('w-full p-2 bg-gray-50 items-center border-t'):
+    # *** Messages Column (Main Content Area) ***
+    # This column fills the space BELOW the header and ABOVE the fixed input area.
+    # Padding bottom is crucial to prevent overlap with the fixed input.
+    INPUT_AREA_HEIGHT_PX = 50
+    messages_column = ui.column().classes(
+        'w-full h-full overflow-y-auto scroll-smooth ' # Fill available height, scroll
+        f'pb-[{INPUT_AREA_HEIGHT_PX}px] ' # Padding bottom = height of fixed input area
+        'mx-auto max-w-none lg:max-w-4xl xl:max-w-5xl ' # Width constraints
+        'px-4 pt-4' # Padding for content
+        )
+    MESSAGES_COLUMN_ID = messages_column.id
+    with messages_column:
+        # Render the chat messages area directly inside
+        chat_messages_area()
+
+    # *** Input Container (Fixed at Viewport Bottom) ***
+    # This container is fixed relative to the viewport.
+    with ui.row().classes(
+        'fixed bottom-0 left-0 right-0 z-10 ' # Fixed positioning, above other content
+        'bg-transparent' # Outer container is transparent
+        ) as fixed_input_container:
+        # *** Inner Input Row (Styled and Constrained Width) ***
+        # This row contains the actual input elements and applies styling/width limits.
+        with ui.row().classes(
+            'w-full p-2 items-center ' # Layout
+            'mx-auto max-w-none lg:max-w-3xl xl:max-w-3xl ' # <<< WIDTH CONSTRAINTS HERE
+            ) as input_area_row:
             chat_input = ui.textarea(placeholder="Type your message...") \
                 .classes('flex-grow') \
                 .props('outlined dense rows=1 max-rows=5 autogrow clearable') \
-                .on('keydown.enter', lambda e: handle_send_message(client, chat_input, send_button, chat_messages_area.refresh, sessions_container.refresh, MESSAGES_COLUMN_ID) if not e.args['shiftKey'] else None, throttle=0.1) # Send on Enter unless Shift+Enter
+                .on('keydown.enter', lambda e: handle_send_message(client, chat_input, send_button, chat_messages_area.refresh, sessions_container.refresh, MESSAGES_COLUMN_ID) if not e.args['shiftKey'] else None, throttle=0.1)
             send_button = ui.button(icon='send').props('flat round dense') \
                 .on('click', lambda: handle_send_message(client, chat_input, send_button, chat_messages_area.refresh, sessions_container.refresh, MESSAGES_COLUMN_ID))
+    # --- End Build Page Layout ---
 
     # --- Initial Data Load ---
     print("UI: Page load - running initial data fetch...")
     await asyncio.gather(
         update_sessions_list(client, sessions_container.refresh),
-        # Load initial chat state (select session will handle messages)
+        # Load initial chat state
         select_chat_session(client, chat_state.get("current_session_id"), chat_messages_area.refresh, MESSAGES_COLUMN_ID)
     )
     print("UI: Initial data fetch complete.")

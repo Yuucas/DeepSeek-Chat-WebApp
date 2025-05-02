@@ -11,7 +11,9 @@ async def handle_signup(client: Client):
     if await api_client.api_get_current_user(): ui.navigate.to(pageRoutes.MAIN_PATH); return
 
     with ui.card().classes('absolute-center w-96'):
+
         ui.label("Sign Up").classes('text-2xl self-center mb-6')
+
         email_input = ui.input("Email").props('type="email" outlined autocomplete="email"').classes('w-full')
         password_input = ui.input("Password").props('type="password" outlined autocomplete="new-password"').classes('w-full')
         confirm_input = ui.input("Confirm Password").props('type="password" outlined autocomplete="new-password"').classes('w-full')
@@ -40,8 +42,9 @@ async def handle_signup(client: Client):
                          print(f"UI: Signed up & logged in: {login_result['email']}")
                          ui.navigate.to(pageRoutes.MAIN_PATH)
                      else: error_label.set_text("Signup ok, auto-login failed."); ui.navigate.to(pageRoutes.LOGIN_PATH)
+                     
             except ValueError as e: error_label.set_text(str(e))
             except Exception as e: print(f"UI Signup Error: {e}"); error_label.set_text("Error.")
 
-        ui.button("Sign Up", on_click=handle_signup_click).classes('w-full mt-6')
-        ui.link("Login", pageRoutes.LOGIN_PATH).classes('mt-4 self-center')
+        ui.button("Sign Up", on_click=handle_signup_click, color='#40040b').classes('w-full mt-4')
+        ui.button("Login", on_click=lambda: ui.navigate.to(pageRoutes.LOGIN_PATH), color='#40040b').classes('w-full mt-2')
