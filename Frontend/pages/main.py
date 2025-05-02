@@ -197,6 +197,11 @@ async def handle_main_chat_page(client: Client):
     print(f"Chat Page: Loading for user {user.get('email')}")
     chat_state = utils.get_chat_state(client)
 
+    # --- Determine Input/Header Heights  ---
+    INPUT_AREA_HEIGHT_PX = 64 
+    HEADER_HEIGHT_PX = 50   
+    # ---
+
     # --- Define Refreshable Containers ---
     @ui.refreshable
     async def sessions_container():
@@ -233,17 +238,18 @@ async def handle_main_chat_page(client: Client):
 
     @ui.refreshable
     def chat_messages_area():
+
         chat_state = utils.get_chat_state(client) # Get fresh state on each refresh
         messages_to_render = chat_state.get("current_messages", [])
-        # print(f"UI: Rendering chat_messages_area. Count: {len(messages_to_render)}")
-        # print(f"Message to Render: {messages_to_render}") # Debug
 
+
+        container_classes = 'w-full h-full flex justify-center items-center text-gray-400' # Base for placeholders
         if not messages_to_render and not chat_state.get("current_session_id"):
-            with ui.column().classes('w-full h-full justify-center items-center text-gray-400'):
+             with ui.column().classes(container_classes):
                  ui.icon('question_answer', size='xl')
                  ui.label("Select a chat or start a new one.")
         elif not messages_to_render and chat_state.get("current_session_id"):
-             with ui.column().classes('w-full h-full justify-center items-center text-gray-400'):
+             with ui.column().classes(container_classes):
                  ui.icon('chat', size='xl')
                  ui.label("Send a message to start the chat!").classes('mt-2')
 
@@ -295,14 +301,20 @@ async def handle_main_chat_page(client: Client):
 
 
     # *** Messages Column (Main Content Area) ***
-    # This column fills the space BELOW the header and ABOVE the fixed input area.
-    # Padding bottom is crucial to prevent overlap with the fixed input.
-    INPUT_AREA_HEIGHT_PX = 50
     messages_column = ui.column().classes(
-        'w-full h-full overflow-y-auto scroll-smooth ' # Fill available height, scroll
-        f'pb-[{INPUT_AREA_HEIGHT_PX}px] ' # Padding bottom = height of fixed input area
-        'mx-auto max-w-none lg:max-w-4xl xl:max-w-5xl ' # Width constraints
-        'px-4 pt-4' # Padding for content
+        'absolute overflow-y-auto scroll-smooth ' # Absolute position, scroll
+        'w-full ' # Span width within constraints
+        'mx-auto max-w-none lg:max-w-4xl xl:max-w-5xl ' # Width constraints & centering
+        'px-4 pt-4 pb-4' # Internal padding for content
+        ).style(
+            # Pin below header and above input area using calculated top/bottom
+            f'top: {HEADER_HEIGHT_PX}px; '
+            f'bottom: {INPUT_AREA_HEIGHT_PX}px; '
+            # Centering for absolute elements requires calc with viewport width (vw)
+            # This calculation centers the element based on its max-width
+            # Adjust max-width values (e.g., '64rem' for 5xl) if needed
+            'left: 50%; transform: translateX(-50%);' # Standard centering for absolute
+            # Note: max-width classes handle the width constraint directly now
         )
     MESSAGES_COLUMN_ID = messages_column.id
     with messages_column:
@@ -321,6 +333,7 @@ async def handle_main_chat_page(client: Client):
             'w-full p-2 items-center ' # Layout
             'mx-auto max-w-none lg:max-w-3xl xl:max-w-3xl ' # <<< WIDTH CONSTRAINTS HERE
             ) as input_area_row:
+            input_area_row.style(f'height: {INPUT_AREA_HEIGHT_PX}px;')
             chat_input = ui.textarea(placeholder="Type your message...") \
                 .classes('flex-grow') \
                 .props('outlined dense rows=1 max-rows=5 autogrow clearable') \
