@@ -202,6 +202,50 @@ async def handle_main_chat_page(client: Client):
     HEADER_HEIGHT_PX = 50   
     # ---
 
+    # --- Inject CSS for Dark Scrollbar ---
+    # --- >> CUSTOMIZE COLORS HERE << ---
+    scrollbar_track_color = "#1f2937" # Match your dark page background (e.g., gray-800)
+    scrollbar_thumb_color = "#4b5563" # A slightly lighter dark gray (e.g., gray-600)
+    scrollbar_thumb_hover_color = "#6b7280" # Lighter still for hover (e.g., gray-500)
+    scrollbar_width = "8px" # Adjust width as desired (e.g., 6px, 10px)
+    # --- >> END CUSTOMIZE << ---
+
+    ui.add_head_html(f'''
+    <style>
+    /* Target the specific messages column */
+    .messages-column-scrollbar::-webkit-scrollbar {{
+    width: {scrollbar_width};
+    height: {scrollbar_width}; /* For horizontal scrollbars if ever needed */
+    }}
+
+    /* Track */
+    .messages-column-scrollbar::-webkit-scrollbar-track {{
+    background: {scrollbar_track_color};
+    border-radius: {scrollbar_width}; /* Optional: round the track ends */
+    }}
+
+    /* Handle */
+    .messages-column-scrollbar::-webkit-scrollbar-thumb {{
+    background-color: {scrollbar_thumb_color};
+    border-radius: {scrollbar_width};
+    /* Optional: Add a border matching the track for a 'padding' effect */
+    /* border: 2px solid {scrollbar_track_color}; */
+    }}
+
+    /* Handle on hover */
+    .messages-column-scrollbar::-webkit-scrollbar-thumb:hover {{
+    background-color: {scrollbar_thumb_hover_color};
+    }}
+
+    /* Firefox Scrollbar Styling */
+    .messages-column-scrollbar {{
+    scrollbar-width: thin; /* Or 'auto' */
+    scrollbar-color: {scrollbar_thumb_color} {scrollbar_track_color}; /* thumb track */
+    }}
+    </style>
+    ''')
+        # --- End CSS Injection ---
+
     # --- Define Refreshable Containers ---
     @ui.refreshable
     async def sessions_container():
@@ -243,15 +287,18 @@ async def handle_main_chat_page(client: Client):
         messages_to_render = chat_state.get("current_messages", [])
 
 
-        container_classes = 'w-full h-full flex justify-center items-center text-gray-400' # Base for placeholders
+        placeholder_container_classes = 'w-full h-full flex flex-col justify-center items-center text-gray-400'
+
         if not messages_to_render and not chat_state.get("current_session_id"):
-             with ui.column().classes(container_classes):
+             # This column now fills height and centers its direct children (icon and label)
+             with ui.column().classes(placeholder_container_classes):
                  ui.icon('question_answer', size='xl')
-                 ui.label("Select a chat or start a new one.")
+                 ui.label("Select a chat or start a new one.").classes('mt-1') # Added small margin-top
         elif not messages_to_render and chat_state.get("current_session_id"):
-             with ui.column().classes(container_classes):
+             # This column now fills height and centers its direct children (icon and label)
+             with ui.column().classes(placeholder_container_classes):
                  ui.icon('chat', size='xl')
-                 ui.label("Send a message to start the chat!").classes('mt-2')
+                 ui.label("Send a message to start the chat!").classes('mt-1')
 
         for msg_data in messages_to_render:
              try:
@@ -301,25 +348,27 @@ async def handle_main_chat_page(client: Client):
 
 
     # *** Messages Column (Main Content Area) ***
-    messages_column = ui.column().classes(
-        'absolute overflow-y-auto scroll-smooth ' # Absolute position, scroll
-        'w-full ' # Span width within constraints
-        'mx-auto max-w-none lg:max-w-4xl xl:max-w-5xl ' # Width constraints & centering
-        'px-4 pt-4 pb-4' # Internal padding for content
-        ).style(
-            # Pin below header and above input area using calculated top/bottom
-            f'top: {HEADER_HEIGHT_PX}px; '
-            f'bottom: {INPUT_AREA_HEIGHT_PX}px; '
-            # Centering for absolute elements requires calc with viewport width (vw)
-            # This calculation centers the element based on its max-width
-            # Adjust max-width values (e.g., '64rem' for 5xl) if needed
-            'left: 50%; transform: translateX(-50%);' # Standard centering for absolute
-            # Note: max-width classes handle the width constraint directly now
-        )
-    MESSAGES_COLUMN_ID = messages_column.id
-    with messages_column:
-        # Render the chat messages area directly inside
-        chat_messages_area()
+    with ui.column().classes(
+        'absolute '
+        f'top-[{HEADER_HEIGHT_PX}px] bottom-[{INPUT_AREA_HEIGHT_PX}px] '
+        'left-0 right-0 '
+        'flex justify-center'
+        ) as messages_wrapper:
+
+        # *** Messages Column (Scrollable Area) ***
+        # ADD the custom class 'messages-column-scrollbar' here
+        messages_column = ui.column().classes(
+            'relative w-full h-full ' # <<< ADD h-full HERE
+            'overflow-y-auto scroll-smooth '
+            'max-w-none lg:max-w-4xl xl:max-w-5xl ' # Width constraints
+            'px-4 pt-4 pb-4 ' # Internal padding
+            'messages-column-scrollbar' # Scrollbar styling class
+            ).style(
+                # No explicit top/bottom/left/transform needed here now
+            )
+        MESSAGES_COLUMN_ID = messages_column.id
+        with messages_column:
+            chat_messages_area()
 
     # *** Input Container (Fixed at Viewport Bottom) ***
     # This container is fixed relative to the viewport.
