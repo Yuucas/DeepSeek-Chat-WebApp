@@ -1,4 +1,4 @@
-from nicegui import ui, app
+from nicegui import app
 
 class PageRoutes:
     def __init__(self, app):

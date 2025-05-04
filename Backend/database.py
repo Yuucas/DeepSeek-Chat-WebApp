@@ -27,7 +27,6 @@ async def get_db_session():
 
 async def async_main():
     async with engine.begin() as conn:
-        # await conn.run_sync(Base.metadata.drop_all) # Use with caution! Deletes tables!
         await conn.run_sync(Base.metadata.create_all)
     print("Database tables created (if they didn't exist).")
 

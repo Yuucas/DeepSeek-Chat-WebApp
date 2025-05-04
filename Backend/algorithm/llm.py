@@ -10,12 +10,12 @@ from peft import PeftModel
 from dotenv import load_dotenv
 from typing import List, Dict, AsyncGenerator
 import asyncio
-import time
+import traceback
 
 # LangChain Imports
 from langchain_huggingface import HuggingFacePipeline
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+
 
 load_dotenv()
 
@@ -35,7 +35,6 @@ if USE_QUANTIZATION:
         bnb_4bit_compute_dtype=torch.bfloat16) 
 
 # --- Global Model State ---
-# Keep model and tokenizer loaded as before
 model = None
 tokenizer = None
 # Add LangChain LLM object
@@ -48,7 +47,7 @@ def load_llm():
         print("LLM and LangChain Pipeline already loaded.")
         return
 
-    # --- Load Tokenizer (same as before) ---
+    # --- Load Tokenizer ---
     print(f"LLM - Loading tokenizer: {BASE_MODEL_ID}")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -56,7 +55,7 @@ def load_llm():
         print("LLM - Set pad_token to eos_token")
     print(f"LLM - Tokenizer EOS: {tokenizer.eos_token_id}, PAD: {tokenizer.pad_token_id}")
 
-    # --- Load Base Model (same as before) ---
+    # --- Load Base Model ---
     print(f"LLM - Loading base model: {BASE_MODEL_ID} (Quantization: {USE_QUANTIZATION})")
     base_model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_ID,
@@ -82,9 +81,9 @@ def load_llm():
             print(f"LLM - Error loading PEFT adapter: {e}")
             raise e
     else:
-        # If not using adapter, assign the base model directly to the global 'model' variable
+        # If not using adapter, assign the base model directly to the global model
         print("LLM - Skipping adapter loading. Using BASE MODEL directly.")
-        model = base_model # <<< Assign base model here
+        model = base_model 
 
     # --- Create Transformers Pipeline ---
     print("LLM - Creating Transformers pipeline...")
@@ -104,8 +103,7 @@ def load_llm():
     )
     print("LLM - Transformers pipeline created.")
 
-    # --- Create LangChain LLM Wrapper ---
-    # Pass pipeline parameters if needed, or rely on pipeline defaults
+    # --- LangChain LLM Wrapper ---
     lc_llm = HuggingFacePipeline(pipeline=pipe)
     print("LLM - LangChain HuggingFacePipeline initialized.")
 
@@ -118,9 +116,8 @@ def _convert_history_to_lc_messages(chat_history: List[Dict[str, str]]):
             messages.append(HumanMessage(content=msg.get("content", "")))
         elif msg.get("role") == "assistant":
             messages.append(AIMessage(content=msg.get("content", "")))
-        # Add handling for 'system' role if you use it
-        # elif msg.get("role") == "system":
-        #     messages.append(SystemMessage(content=msg.get("content", "")))
+        else:
+            pass
     return messages
 
 
@@ -131,27 +128,22 @@ async def generate_lc_response_stream(chat_history: List[Dict[str, str]]) -> Asy
         yield "[ERROR] LangChain LLM not loaded."
         return
 
-    start_time = time.time()
-    print("LLM (LC) - Starting response stream generation.")
-
     try:
-        # --- History Truncation (Keep this) ---
+        # --- History Truncation ---
         MAX_TURNS = 10
         truncated_history_dicts = chat_history[-MAX_TURNS*2:]
         print(f"LLM (LC) - Truncated history length: {len(truncated_history_dicts)}")
 
         # --- Convert history to LangChain messages ---
         lc_messages = _convert_history_to_lc_messages(truncated_history_dicts)
-
         
-        # --- Optional: Log the prompt string the model actually sees ---
-        # This helps verify if the template adds anything weird.
+        # --- Log the prompt string the model actually sees ---
         try:
             # Attempt to format using the tokenizer's template logic
             formatted_prompt_for_debug = tokenizer.apply_chat_template(
                 conversation=[msg.to_dict() for msg in lc_messages], # Convert LangChain messages back to dicts
                 tokenize=False,
-                add_generation_prompt=True # Important for assistant response
+                add_generation_prompt=True
             )
             print(f"\n------ LANGCHAIN FORMATTED PROMPT ------\n{formatted_prompt_for_debug}\n-------------------------------------\n")
         except Exception as e:
@@ -163,17 +155,14 @@ async def generate_lc_response_stream(chat_history: List[Dict[str, str]]) -> Asy
 
         token_count = 0
         async for chunk in lc_llm.astream(lc_messages):
-            # chunk is typically a string token when streaming from HF pipeline
-            # print(f"LLM (LC) - Yielding chunk: {chunk}") # Verbose debug
             token_count += 1
             yield chunk
-            await asyncio.sleep(0.01) # Small sleep remains useful
+            await asyncio.sleep(0.01)
 
-        end_time = time.time()
-        print(f"LLM (LC) - Streaming finished. Tokens yielded: {token_count}. Time: {end_time - start_time:.2f}s")
+
+        print(f"LLM (LC) - Streaming finished. Tokens yielded: {token_count}.")
 
     except Exception as e:
         print(f"LLM (LC) - Error during LangChain stream generation: {e}")
-        import traceback
         traceback.print_exc()
         yield f"[ERROR] Could not generate response via LangChain: {e}"

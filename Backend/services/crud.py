@@ -53,7 +53,7 @@ async def create_chat_session(db: AsyncSession, user_id: int, title: Optional[st
     return db_session
 
 async def add_chat_message(db: AsyncSession, session_id: str, role: str, content: str) -> ChatMessage:
-    """Adds a message and updates session timestamp. Assumes caller manages transaction commit."""
+    """Adds a message and updates session timestamp."""
     # Update session timestamp
     stmt = (
          update(ChatSession)
@@ -64,10 +64,11 @@ async def add_chat_message(db: AsyncSession, session_id: str, role: str, content
     # Add message
     db_message = ChatMessage(session_id=session_id, role=role, content=content)
     db.add(db_message)
-    # Flush and Refresh (no commit)
+    # Flush and Refresh 
     await db.flush([db_message])
+
     await db.refresh(db_message)
-    # No commit here
+
     return db_message
 
 async def delete_chat_session(db: AsyncSession, session_id: str, user_id: int):
@@ -82,23 +83,24 @@ async def delete_chat_session(db: AsyncSession, session_id: str, user_id: int):
     session_to_delete = result.scalar_one_or_none()
 
     if session_to_delete:
-        # 2. Use session.delete() on the ORM object
-        # SQLAlchemy will handle the cascade delete for related ChatMessage objects
-        # because of cascade="all, delete-orphan" on the relationship in models.py
+
         await db.delete(session_to_delete)
-        await db.commit() # Commit the deletion of the session and cascaded messages
+        # --- Commit the deletion of the session and cascaded messages ---
+        await db.commit() 
         print(f"CRUD: Deleted session {session_id} and its messages via ORM cascade.")
-        return True # Indicate success
+        # Indicate success
+        return True
     else:
         # Session not found or doesn't belong to the user
         print(f"CRUD: Session {session_id} not found for user {user_id} or already deleted.")
-        return False # Indicate session not found/deleted
+        # Indicate session not found/deleted
+        return False 
 
 async def delete_all_user_sessions(db: AsyncSession, user_id: int):
     """
     Deletes all chat sessions for a user using ORM cascade for messages.
     """
-    # Fetch all session objects for the user
+    # --- Fetch all session objects for the user ---
     stmt = select(ChatSession).where(ChatSession.user_id == user_id)
     result = await db.execute(stmt)
     sessions_to_delete = result.scalars().all()

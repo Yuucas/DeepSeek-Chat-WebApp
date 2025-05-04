@@ -1,13 +1,10 @@
-# file: frontend/sse_client.py
 import httpx
-import asyncio
 from typing import AsyncGenerator, Optional
 import os
 
 BACKEND_BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 # Reuse the client instance if possible, or create a new one for SSE
-# Be mindful of cookie persistence if creating new clients frequently
 _sse_client = httpx.AsyncClient(base_url=BACKEND_BASE_URL, timeout=None) # No timeout for SSE stream
 
 async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) -> AsyncGenerator[str, None]:
@@ -44,7 +41,6 @@ async def stream_chat_responses(stream_id: str, cookies: Optional[dict] = None) 
                          break
                     else:
                         yield data # Yield the actual token/message
-
 
     except httpx.RequestError as e:
         print(f"SSE Request Error: {e}")

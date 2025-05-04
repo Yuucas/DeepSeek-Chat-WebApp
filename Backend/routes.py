@@ -9,12 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Use relative imports
 from .services import crud, auth
-from .database import get_db_session, async_session_maker # Import session maker
+from .database import get_db_session, async_session_maker 
 from .dependencies import get_current_active_user, get_current_user_id_from_session
 from .models import User, UserCreate, UserLogin, UserPublic, SessionInfo, SessionDetail, InitiateChatRequestApi, InitiateChatResponseApi
 from .algorithm import llm
 
-router = APIRouter(prefix="/api", tags=["ChatApp"]) # Changed tag
+router = APIRouter(prefix="/api", tags=["ChatApp"]) 
 
 # --- Auth Routes ---
 @router.post("/signup", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
@@ -25,6 +25,7 @@ async def api_signup(user_data: UserCreate, db: AsyncSession = Depends(get_db_se
     user = await crud.create_user(db, email=user_data.email, password=user_data.password)
     return user
 
+# --- Login Route ---
 @router.post("/login")
 async def api_login(request: Request, form_data: UserLogin, db: AsyncSession = Depends(get_db_session)):
     user = await crud.get_user_by_email(db, email=form_data.email)
@@ -35,6 +36,7 @@ async def api_login(request: Request, form_data: UserLogin, db: AsyncSession = D
     print(f"API: Session set for user_id: {request.session['user_id']}")
     return {"message": "Login successful", "user_id": user.id, "email": user.email}
 
+# --- Logout Route ---
 @router.post("/logout")
 async def api_logout(request: Request):
     request.session.clear()
@@ -52,12 +54,14 @@ async def api_get_sessions(user_id: int = Depends(get_current_user_id_from_sessi
     sessions = await crud.get_user_sessions(db, user_id=user_id)
     return sessions
 
+# --- Session Detail Route ---
 @router.get("/sessions/{session_id}", response_model=SessionDetail)
 async def api_get_session_details(session_id: str, user_id: int = Depends(get_current_user_id_from_session), db: AsyncSession = Depends(get_db_session)):
     session = await crud.get_session_by_id(db, session_id=session_id, user_id=user_id)
     if not session: raise HTTPException(status_code=404, detail="Session not found")
     return session
 
+# --- Delete Session Route ---
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def api_delete_session(session_id: str, user_id: int = Depends(get_current_user_id_from_session), db: AsyncSession = Depends(get_db_session)):
     deleted = await crud.delete_chat_session(db, session_id=session_id, user_id=user_id)
@@ -90,11 +94,11 @@ async def api_initiate_chat(
         user_message = await crud.add_chat_message(
             db, session_id=session_id, role="user", content=user_message_content
         )
-        # No explicit commit needed here, db.begin() handles it on successful block exit
+
 
     # Fetch history *after* transaction is committed
     updated_session = await crud.get_session_by_id(db, session_id=session_id, user_id=user_id)
-    # Ensure messages are loaded (selectinload should handle this, but double-check if issues persist)
+    # Ensure messages are loaded
     if not updated_session or not hasattr(updated_session, 'messages'):
          raise HTTPException(status_code=500, detail="Failed to load session messages after update")
 
@@ -112,8 +116,8 @@ async def api_stream_chat(stream_id: str):
     """Handles the SSE connection, filters <think> tags, and streams the final response."""
     print(f"API: SSE connection requested for stream ID: {stream_id}")
 
-    # LLM object check now implicitly checks if lc_llm is loaded via llm.py
-    if llm.lc_llm is None: # Check the LangChain LLM object
+    # LLM object check now implicitly checks if lc_llm is loaded
+    if llm.lc_llm is None:
          raise HTTPException(status_code=503, detail="LLM not loaded yet")
 
     context = stream_contexts.pop(stream_id, None)
@@ -135,7 +139,6 @@ async def api_stream_chat(stream_id: str):
             print(f"API: Starting LangChain LLM stream for {stream_id}")
             async for token in llm.generate_lc_response_stream(history):
                 token_count += 1
-                # print(f"API: Received token from LLM stream: '{token}'") # Optional debug
 
                 if "[ERROR]" in token:
                     print(f"API: LLM Error received via LangChain stream {stream_id}: {token}")
@@ -147,7 +150,6 @@ async def api_stream_chat(stream_id: str):
                 # --- Yield token directly (NO filtering) ---
                 full_response += token
                 sse_data = f"data: {token}\n\n"
-                # print(f"API: Yielding SSE data: {sse_data.strip()}") # Optional debug
                 yield sse_data
                 # --- End direct yield ---
 
@@ -162,7 +164,7 @@ async def api_stream_chat(stream_id: str):
             try: yield f"data: {full_response}\n\n"
             except Exception: pass
         finally:
-            # --- Save the FULL raw response (or error) ---
+            # --- Save the FULL raw response ---
             final_content_to_save = full_response.strip() # Use the raw response
 
             if not llm_error_occurred and final_content_to_save:
@@ -174,11 +176,10 @@ async def api_stream_chat(stream_id: str):
                         print(f"API: Successfully saved FULL assistant message for session {session_id}")
                 except Exception as db_err:
                     print(f"API: CRITICAL - Failed to save FULL assistant message for session {session_id}: {db_err}")
-                    # try: yield f"data: [ERROR] Failed to save response to DB.\n\n"
-                    # except Exception: pass
+                    traceback.print_exc() # Print the full traceback for debugging
             elif not final_content_to_save and not llm_error_occurred:
                  print(f"API: No response generated for stream {stream_id}, not saving.")
-            else: # Error occurred
+            else: 
                 print(f"API: Skipping DB save due to error or empty response for stream {stream_id}.")
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

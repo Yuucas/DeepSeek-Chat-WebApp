@@ -20,7 +20,7 @@ async def scroll_chat_to_bottom(client: Client, messages_column_id: Optional[int
     chat_state = utils.get_chat_state(client)
     if not chat_state.get('current_messages') or not messages_column_id: return
     await asyncio.sleep(0.15) # Delay for rendering
-    # Use client.run_javascript as this might be called from background task
+    # Use the client to run JavaScript to scroll the element
     await client.run_javascript(f'''
         const el = getElement({messages_column_id});
         if (el) {{ el.scrollTop = el.scrollHeight; }}
@@ -58,7 +58,7 @@ async def select_chat_session(client: Client, session_id: Optional[str], chat_re
             loaded_session_id = session_id # Confirm this session was loaded
         else:
             ui.notify("Could not load session details.", type='negative')
-            # Keep loaded_session_id as None if load failed
+
     # Update state using helper
     utils.update_chat_state(client, current_session_id=loaded_session_id, current_messages=messages, current_title=title)
     await update_chat_display(client, chat_refresh_func, messages_column_id)
@@ -98,7 +98,7 @@ async def handle_send_message(client: Client, chat_input: ui.input, send_button:
     new_messages_list = chat_state["current_messages"] + [user_message, assistant_placeholder]
     utils.update_chat_state(client, current_messages=new_messages_list.copy(), is_generating=True) # Use copy
     send_button.props('loading').classes('animate-pulse')
-    await update_chat_display(client, chat_refresh_func, messages_column_id) # Refresh UI now
+    await update_chat_display(client, chat_refresh_func, messages_column_id) # Refresh UI
 
     # 2. Call API
     init_response = await api_client.api_initiate_chat(current_session_id, user_input)
@@ -203,12 +203,10 @@ async def handle_main_chat_page(client: Client):
     # ---
 
     # --- Inject CSS for Dark Scrollbar ---
-    # --- >> CUSTOMIZE COLORS HERE << ---
     scrollbar_track_color = "#1f2937" # Match your dark page background (e.g., gray-800)
     scrollbar_thumb_color = "#4b5563" # A slightly lighter dark gray (e.g., gray-600)
     scrollbar_thumb_hover_color = "#6b7280" # Lighter still for hover (e.g., gray-500)
     scrollbar_width = "8px" # Adjust width as desired (e.g., 6px, 10px)
-    # --- >> END CUSTOMIZE << ---
 
     ui.add_head_html(f'''
     <style>
@@ -221,14 +219,14 @@ async def handle_main_chat_page(client: Client):
     /* Track */
     .messages-column-scrollbar::-webkit-scrollbar-track {{
     background: {scrollbar_track_color};
-    border-radius: {scrollbar_width}; /* Optional: round the track ends */
+    border-radius: {scrollbar_width}; /* Round the track ends */
     }}
 
     /* Handle */
     .messages-column-scrollbar::-webkit-scrollbar-thumb {{
     background-color: {scrollbar_thumb_color};
     border-radius: {scrollbar_width};
-    /* Optional: Add a border matching the track for a 'padding' effect */
+    /* Add a border matching the track for a 'padding' effect */
     /* border: 2px solid {scrollbar_track_color}; */
     }}
 
@@ -244,7 +242,7 @@ async def handle_main_chat_page(client: Client):
     }}
     </style>
     ''')
-        # --- End CSS Injection ---
+    # --- End CSS Injection ---
 
     # --- Define Refreshable Containers ---
     @ui.refreshable
@@ -290,42 +288,43 @@ async def handle_main_chat_page(client: Client):
         placeholder_container_classes = 'w-full h-full flex flex-col justify-center items-center text-gray-400'
 
         if not messages_to_render and not chat_state.get("current_session_id"):
-             # This column now fills height and centers its direct children (icon and label)
+             # Fills height and centers its direct children (icon and label)
              with ui.column().classes(placeholder_container_classes):
                  ui.icon('question_answer', size='xl')
                  ui.label("Select a chat or start a new one.").classes('mt-1') # Added small margin-top
         elif not messages_to_render and chat_state.get("current_session_id"):
-             # This column now fills height and centers its direct children (icon and label)
+             # Fills height and centers its direct children (icon and label)
              with ui.column().classes(placeholder_container_classes):
                  ui.icon('chat', size='xl')
                  ui.label("Send a message to start the chat!").classes('mt-1')
 
         for msg_data in messages_to_render:
-             try:
-                 # ... (your message rendering logic using ui.chat_message and ui.html) ...
-                 role = msg_data.get('role', 'unknown')
-                 raw_content = msg_data.get('content', '')
-                 is_user = role == 'user'
-                 name = role.capitalize()
-                 is_loading = (role == 'assistant' and
-                             chat_state.get("is_generating", False) and
-                             str(msg_data.get('id', '')).startswith(ASSISTANT_PLACEHOLDER_ID_PREFIX))
 
-                 with ui.chat_message(name=name, sent=is_user):
-                     escaped_content = html.escape(raw_content)
-                     pre_style = "white-space: pre-wrap; word-wrap: break-word; font-family: monospace; margin: 0;"
-                     html_content = f'<pre style="{pre_style}">{escaped_content}</pre>'
-                     if is_loading:
-                         with ui.row().classes('items-center'):
-                             ui.spinner(size='sm').classes('mr-2')
-                             if raw_content:
-                                 ui.html(html_content)
-                     else:
-                         ui.html(html_content)
-             except Exception as e: print(f"ERROR render message: {e}"); traceback.print_exc()
+            try:
+                # Check if the message is a placeholder and skip rendering it
+                role = msg_data.get('role', 'unknown')
+                raw_content = msg_data.get('content', '')
+                is_user = role == 'user'
+                name = role.capitalize()
+                is_loading = (role == 'assistant' and
+                            chat_state.get("is_generating", False) and
+                            str(msg_data.get('id', '')).startswith(ASSISTANT_PLACEHOLDER_ID_PREFIX))
+
+                with ui.chat_message(name=name, sent=is_user):
+                    escaped_content = html.escape(raw_content)
+                    pre_style = "white-space: pre-wrap; word-wrap: break-word; font-family: monospace; margin: 0;"
+                    html_content = f'<pre style="{pre_style}">{escaped_content}</pre>'
+                    if is_loading:
+                        with ui.row().classes('items-center'):
+                            ui.spinner(size='sm').classes('mr-2')
+                            if raw_content:
+                                ui.html(html_content)
+                    else:
+                        ui.html(html_content)
+            except Exception as e: print(f"ERROR render message: {e}"); traceback.print_exc()
+
 
     # --- Build Page Layout ---
-    # Header
     with ui.header(elevated=True).classes('items-center justify-between bg-[#40040b] text-white'):
         with ui.row().classes('items-center'):
              # Button to toggle left drawer
@@ -347,7 +346,7 @@ async def handle_main_chat_page(client: Client):
             await sessions_container() # Render sessions list
 
 
-    # *** Messages Column (Main Content Area) ***
+    # --- Messages Column (Main Content Area) ---
     with ui.column().classes(
         'absolute '
         f'top-[{HEADER_HEIGHT_PX}px] bottom-[{INPUT_AREA_HEIGHT_PX}px] '
@@ -355,32 +354,29 @@ async def handle_main_chat_page(client: Client):
         'flex justify-center'
         ) as messages_wrapper:
 
-        # *** Messages Column (Scrollable Area) ***
-        # ADD the custom class 'messages-column-scrollbar' here
+        # --- Messages Column (Scrollable Area) ---
         messages_column = ui.column().classes(
-            'relative w-full h-full ' # <<< ADD h-full HERE
+            'relative w-full h-full '
             'overflow-y-auto scroll-smooth '
-            'max-w-none lg:max-w-4xl xl:max-w-5xl ' # Width constraints
-            'px-4 pt-4 pb-4 ' # Internal padding
+            'max-w-none lg:max-w-4xl xl:max-w-5xl '
+            'px-4 pt-4 pb-4 '
             'messages-column-scrollbar' # Scrollbar styling class
-            ).style(
-                # No explicit top/bottom/left/transform needed here now
             )
+        
         MESSAGES_COLUMN_ID = messages_column.id
         with messages_column:
             chat_messages_area()
 
-    # *** Input Container (Fixed at Viewport Bottom) ***
-    # This container is fixed relative to the viewport.
+    # --- Input Container ---
     with ui.row().classes(
-        'fixed bottom-0 left-0 right-0 z-10 ' # Fixed positioning, above other content
-        'bg-transparent' # Outer container is transparent
+        'fixed bottom-0 left-0 right-0 z-10 ' 
+        'bg-transparent'
         ) as fixed_input_container:
-        # *** Inner Input Row (Styled and Constrained Width) ***
-        # This row contains the actual input elements and applies styling/width limits.
+
+        # --- Inner Input Row ---
         with ui.row().classes(
             'w-full p-2 items-center ' # Layout
-            'mx-auto max-w-none lg:max-w-3xl xl:max-w-3xl ' # <<< WIDTH CONSTRAINTS HERE
+            'mx-auto max-w-none lg:max-w-3xl xl:max-w-3xl '
             ) as input_area_row:
             input_area_row.style(f'height: {INPUT_AREA_HEIGHT_PX}px;')
             chat_input = ui.textarea(placeholder="Type your message...") \

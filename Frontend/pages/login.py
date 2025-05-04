@@ -3,17 +3,14 @@ from .. import api_client
 from ..pageRoutes import pageRoutes
 
 
-
-
-
+# --- Login page for the web app ---
+# This page allows users to log in to their account using their email and password.
 async def handle_login(client: Client):
 
     if await api_client.api_get_current_user(): ui.navigate.to(pageRoutes.MAIN_PATH); return
 
-
     # --- State variable to track password visibility ---
     password_state = {'visible': False}
-
 
     with ui.card().classes('absolute-center md:w-2/4 lg:w-1/3 mx-auto text-white'):
 
@@ -34,8 +31,8 @@ async def handle_login(client: Client):
             new_icon = 'visibility' if password_state['visible'] else 'visibility_off'
             # Update input props
             password_input.props(f'type={new_type}')
-            # Update button props - make sure toggle_button is defined before calling this
-            if toggle_button: # Check if button exists (it will after creation)
+            # Update button props 
+            if toggle_button: # Check if button exists
                 toggle_button.props(f'icon={new_icon}')
 
         # --- Add the toggle button to the input's append slot ---

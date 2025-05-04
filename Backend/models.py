@@ -1,12 +1,12 @@
 from .database import Base
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import String, Text, ForeignKey, BigInteger, func, DateTime # Import DateTime
+from sqlalchemy import String, Text, ForeignKey, BigInteger, func, DateTime
 import datetime
 from typing import List, Optional
 
 class User(Base):
-    __tablename__ = "chat_users" # Use a more descriptive name
+    __tablename__ = "chat_users"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
@@ -54,20 +54,20 @@ class UserCreate(BaseModel):
     password: str
 
 class UserLogin(BaseModel):
-    email: EmailStr # Often username in FastAPI OAuth2 examples
+    email: EmailStr
     password: str
 
 class UserPublic(BaseModel):
     id: int
     email: EmailStr
     class Config:
-        from_attributes = True # Or orm_mode = True for older Pydantic
+        from_attributes = True 
 
 class SessionInfo(BaseModel):
     id: str
     title: Optional[str] = None
-    # Add other fields if needed by frontend list (e.g., last_updated_at)
-    last_updated_at: datetime.datetime # Import datetime
+    last_updated_at: datetime.datetime
+
     class Config:
         from_attributes = True
 
@@ -75,18 +75,18 @@ class MessageInfo(BaseModel):
     id: int
     role: str
     content: str
-    timestamp: datetime.datetime # Import datetime
+    timestamp: datetime.datetime 
     class Config:
         from_attributes = True
 
 class SessionDetail(SessionInfo):
     messages: List[MessageInfo] = []
 
-class InitiateChatRequestApi(BaseModel): # Renamed to avoid clash
-    session_id: Optional[str] = None # Can be null for new chat
+class InitiateChatRequestApi(BaseModel): 
+    session_id: Optional[str] = None 
     user_message: str
 
-class InitiateChatResponseApi(BaseModel): # Renamed
+class InitiateChatResponseApi(BaseModel):
     session_id: str
     user_message_id: int
     stream_id: str # ID to use for the SSE connection

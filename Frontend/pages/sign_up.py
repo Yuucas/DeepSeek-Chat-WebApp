@@ -1,7 +1,6 @@
 from nicegui import ui, app, Client
 from email_validator import validate_email, EmailNotValidError
 
-# Use relative imports
 from .. import api_client
 from ..pageRoutes import pageRoutes
 

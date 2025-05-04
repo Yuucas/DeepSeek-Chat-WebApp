@@ -33,9 +33,9 @@ app = FastAPI(lifespan=lifespan, title="Chat App Backend API")
 app.add_middleware(
     SessionMiddleware,
     secret_key=SECRET_KEY,
-    # https_only=True, # Set to True in production with HTTPS
-    # max_age=14 * 24 * 60 * 60, # Example: 14 days session expiry
-    # same_site="lax", # Good default for security ('strict' is more secure but can break some cross-site links)
+    # https_only=True,
+    # max_age=14 * 24 * 60 * 60, 
+    # same_site="lax", 
 )
 
 app.include_router(router)
