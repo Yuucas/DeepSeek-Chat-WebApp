@@ -40,7 +40,4 @@ async def get_current_active_user(
     user = await crud.get_user_by_id(db, user_id=user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    # --- Checks here if users can be inactive ---
-    if not user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
     return user

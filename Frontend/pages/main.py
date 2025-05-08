@@ -348,7 +348,7 @@ async def handle_main_chat_page(client: Client):
 
     # --- Messages Column (Main Content Area) ---
     with ui.column().classes(
-        'absolute '
+        'absolute items-center '
         f'top-[{HEADER_HEIGHT_PX}px] bottom-[{INPUT_AREA_HEIGHT_PX}px] '
         'left-0 right-0 '
         'flex justify-center'
@@ -369,14 +369,16 @@ async def handle_main_chat_page(client: Client):
 
     # --- Input Container ---
     with ui.row().classes(
-        'fixed bottom-0 left-0 right-0 z-10 ' 
-        'bg-transparent'
+        'absolute items-center '
+        'fixed bottom-0 left-0 right-0 z-12 ' 
+        'bg-transparent '
+        'flex justify-center'
         ) as fixed_input_container:
 
         # --- Inner Input Row ---
         with ui.row().classes(
             'w-full p-2 items-center ' # Layout
-            'mx-auto max-w-none lg:max-w-3xl xl:max-w-3xl '
+            'mx-auto max-w-none lg:max-w-4xl xl:max-w-5xl '
             ) as input_area_row:
             input_area_row.style(f'height: {INPUT_AREA_HEIGHT_PX}px;')
             chat_input = ui.textarea(placeholder="Type your message...") \
